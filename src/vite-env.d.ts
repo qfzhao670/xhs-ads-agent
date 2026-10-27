@@ -10,6 +10,8 @@ interface Window {
     getProject(): Promise<ApiResult>
     saveAsset(kind: AssetKind, value: Record<string, string>): Promise<ApiResult>
     deleteAsset(kind: AssetKind, id: string): Promise<ApiResult>
+    downloadAssetTemplate(kind: BatchAssetKind): Promise<ApiResult>
+    importAssetBatch(kind: BatchAssetKind): Promise<ApiResult>
     getSettings(): Promise<ModelSettings>
     saveSettings(settings: ModelSettings): Promise<ApiResult>
     extractFacts(resolution?: string): Promise<ApiResult>
@@ -23,14 +25,20 @@ interface Window {
 }
 
 type AssetKind = 'keywords' | 'references' | 'rules'
-type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean }
+type BatchAssetKind = 'keywords' | 'rules'
+type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; savedPath?: string }
 type ModelSettings = { baseUrl: string; apiKey: string; model: string }
 
-type Keyword = { id: string; value: string; note: string; createdAt: string; updatedAt: string }
-type Rule = { id: string; content: string; note: string; createdAt: string; updatedAt: string }
+type Keyword = {
+  id: string; category: string; root: string; partOfSpeech: string; intentTag: string;
+  suggestedUse: string; createdAt: string; updatedAt: string
+}
+type Rule = {
+  id: string; prohibited: string; riskType: string; basis: string; handling: string;
+  replacement: string; createdAt: string; updatedAt: string
+}
 type Reference = {
-  id: string; title: string; body: string; author: string; contentType: string;
-  performance: string; note: string; createdAt: string; updatedAt: string
+  id: string; title: string; body: string; hashtags: string[]; createdAt: string; updatedAt: string
 }
 type Conflict = { topic: string; versions: string[]; question: string }
 type Facts = { confirmedFacts: { category: string; items: string[] }[]; promotionalExpressions: string[]; conflicts: Conflict[]; generatedAt: string }

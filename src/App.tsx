@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Archive, BookOpenText, Check, CheckCircle2, ChevronDown, ChevronRight,
-  Circle, FileText, FolderOpen, KeyRound, LayoutTemplate, LoaderCircle,
+  Circle, Download, FileText, FolderOpen, KeyRound, LayoutTemplate, LoaderCircle,
   PackageOpen, PenLine, Plus, RefreshCw, Scale, Settings, SlidersHorizontal,
-  Sparkles, Trash2, WandSparkles, X,
+  Sparkles, Trash2, Upload, WandSparkles, X,
 } from 'lucide-react'
 
 type Page = 'generate' | 'assets' | 'settings'
@@ -18,9 +18,9 @@ const flowSteps = [
 ] as const
 
 const emptyForms = {
-  keywords: { id: '', value: '', note: '' },
-  rules: { id: '', content: '', note: '' },
-  references: { id: '', title: '', body: '', author: '', contentType: '', performance: '', note: '' },
+  keywords: { id: '', category: '', root: '', partOfSpeech: '', intentTag: '', suggestedUse: '' },
+  rules: { id: '', prohibited: '', riskType: '', basis: '', handling: '', replacement: '' },
+  references: { id: '', title: '', body: '', hashtags: '' },
 }
 
 function App() {
@@ -110,14 +110,39 @@ function App() {
   async function importMaterial() { await run('material', () => window.workshop.importMaterial(), '原始素材已更新') }
   function openAsset(kind: AssetKind, item?: Keyword | Rule | Reference) {
     setAssetTab(kind)
-    setForm(item ? { ...item } as unknown as Record<string, string> : { ...emptyForms[kind] })
+    if (kind === 'references' && item) {
+      const reference = item as Reference
+      setForm({ id: reference.id, title: reference.title, body: reference.body, hashtags: reference.hashtags.join(' ') })
+    } else setForm(item ? { ...item } as unknown as Record<string, string> : { ...emptyForms[kind] })
     setModal(kind)
   }
   async function saveAsset() {
-    const required = assetTab === 'keywords' ? form.value : assetTab === 'rules' ? form.content : form.title && form.body
-    if (!required?.trim()) { setError(assetTab === 'references' ? '标题和正文为必填项' : '请填写内容'); return }
+    const required = assetTab === 'keywords' ? form.root : assetTab === 'rules' ? form.prohibited : form.title && form.body
+    if (!required?.trim()) {
+      setError(assetTab === 'keywords' ? '核心关键词/词根为必填项' : assetTab === 'rules' ? '禁用词/敏感表述为必填项' : '标题和正文为必填项')
+      return
+    }
     const ok = await run('asset', () => window.workshop.saveAsset(assetTab, form), form.id ? '记录已更新' : '记录已添加')
     if (ok) setModal(null)
+  }
+  async function downloadAssetTemplate(kind: BatchAssetKind) {
+    setBusy(`template-${kind}`); setError('')
+    try {
+      const result = await window.workshop.downloadAssetTemplate(kind)
+      if (!result.ok) { showError(result.error); return }
+      flash('模板已保存')
+    } catch (e) { showError(e instanceof Error ? e.message : '模板下载失败') }
+    finally { setBusy('') }
+  }
+  async function importAssetBatch(kind: BatchAssetKind) {
+    setBusy(`import-${kind}`); setError('')
+    try {
+      const result = await window.workshop.importAssetBatch(kind)
+      if (!result.ok) { showError(result.error); return }
+      if (result.data) setProject(result.data)
+      flash(`已导入 ${result.imported || 0} 条记录`)
+    } catch (e) { showError(e instanceof Error ? e.message : '批量导入失败') }
+    finally { setBusy('') }
   }
   async function deleteAsset(kind: AssetKind, id: string) {
     if (!window.confirm(`确定删除 ${id}？该编号之后不会再分配给新记录。`)) return
@@ -181,7 +206,7 @@ function App() {
           revise={async () => { const ok = await run('revise', () => window.workshop.reviseDraft(revision), '修改版本已生成'); if (ok) setRevision('') }}
           confirm={() => run('confirm', () => window.workshop.confirmDraft(), '当前版本已确认并归档')}
         />}
-        {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} busy={busy} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
+        {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} downloadAssetTemplate={downloadAssetTemplate} importAssetBatch={importAssetBatch} busy={busy} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
         {page === 'settings' && <SettingsPage settings={settings} setSettings={setSettings} save={saveSettings} busy={busy} />}
       </main>
 
@@ -313,17 +338,45 @@ function ArchivedGeneration({ record }: { record: GenerationRecord }) {
   return <section className="flow-panel surface-card"><StepHeader step={record.id} title="历史生成记录">该记录已归档，仅供查看，不会影响当前生成。</StepHeader>{draft ? <article className="draft-preview archived"><div className="draft-meta"><span>V{draft.version}</span><span>{formatTime(draft.createdAt)}</span>{draft.confirmed && <b><CheckCircle2 size={14} />已确认</b>}</div><h3>{draft.title}</h3><div>{draft.body.split('\n').map((line, index) => <p key={index}>{line || '\u00a0'}</p>)}</div><footer>{draft.hashtags.map((tag) => <span key={tag}>#{tag}</span>)}</footer></article> : <Gate icon={<Archive size={25} />} message="这轮生成没有产出文案" target="记录保留了当时的进度，但没有可预览的终稿。" />}</section>
 }
 
-function AssetsPage({ project, chooseFolder, importMaterial, busy, tab, setTab, openAsset, deleteAsset, goGenerate }: { project: ProjectData | null; chooseFolder: () => void; importMaterial: () => void; busy: string; tab: AssetKind; setTab: (tab: AssetKind) => void; openAsset: (kind: AssetKind, item?: Keyword | Rule | Reference) => void; deleteAsset: (kind: AssetKind, id: string) => void; goGenerate: () => void }) {
+function AssetsPage({ project, chooseFolder, importMaterial, downloadAssetTemplate, importAssetBatch, busy, tab, setTab, openAsset, deleteAsset, goGenerate }: {
+  project: ProjectData | null; chooseFolder: () => void; importMaterial: () => void;
+  downloadAssetTemplate: (kind: BatchAssetKind) => void; importAssetBatch: (kind: BatchAssetKind) => void;
+  busy: string; tab: AssetKind; setTab: (tab: AssetKind) => void;
+  openAsset: (kind: AssetKind, item?: Keyword | Rule | Reference) => void;
+  deleteAsset: (kind: AssetKind, id: string) => void; goGenerate: () => void;
+}) {
   const labels = { keywords: ['关键词', '关键词'], references: ['参考文案', '参考文案'], rules: ['合规准则', '准则'] }
   const items = project?.[tab] || []
-  return <div className="page-content"><PageHeader title="素材管理" action={project && <button className="primary" onClick={goGenerate}><WandSparkles size={17} />前往文案生成</button>}>维护项目的原始素材、关键词、参考文案和合规要求，后续每轮生成都会读取最新版本。</PageHeader>{!project ? <ProjectEmpty recent={[]} openRecent={() => undefined} chooseFolder={chooseFolder} /> : <><section className={`material-card surface-card ${project.material.exists ? 'ready' : ''}`}><span className="large-icon"><FileText size={25} /></span><div><span>业务原始素材</span><h2>{project.material.exists ? '业务原始素材.md' : '尚未导入 Markdown 文件'}</h2><p>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 更新后可重新提取业务事实` : '请先将 PDF 和图片完整转换为 Markdown'}</p></div><button className="secondary" onClick={importMaterial} disabled={!!busy}>{busy === 'material' ? <LoaderCircle className="spin" size={17} /> : <FileText size={17} />}{project.material.exists ? '替换文件' : '导入文件'}</button></section><section className="asset-library surface-card"><div className="asset-tabs">{(Object.keys(labels) as AssetKind[]).map((key) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{labels[key][0]}<span>{project[key].length}</span></button>)}</div><div className="asset-toolbar"><div><h2>{labels[tab][0]}</h2><p>系统编号固定不变，删除后不会重新分配。</p></div><button className="primary compact" onClick={() => openAsset(tab)}><Plus size={16} />新增{labels[tab][1]}</button></div>{items.length === 0 ? <div className="compact-empty tall"><Archive size={25} /><b>还没有{labels[tab][0]}</b><span>这类资料可以暂时留空，不会阻断生成流程。</span></div> : <div className="asset-table"><div className="asset-table-head"><span>编号</span><span>内容</span><span>备注</span><span>操作</span></div>{items.map((item) => <AssetRow key={item.id} kind={tab} item={item} edit={() => openAsset(tab, item)} remove={() => deleteAsset(tab, item.id)} />)}</div>}</section></>}</div>
+  const batchKind = tab === 'keywords' || tab === 'rules' ? tab : null
+  return <div className="page-content"><PageHeader title="素材管理" action={project && <button className="primary" onClick={goGenerate}><WandSparkles size={17} />前往文案生成</button>}>维护项目的原始素材、关键词、参考文案和合规要求，后续每轮生成都会读取最新版本。</PageHeader>{!project ? <ProjectEmpty recent={[]} openRecent={() => undefined} chooseFolder={chooseFolder} /> : <><section className={`material-card surface-card ${project.material.exists ? 'ready' : ''}`}><span className="large-icon"><FileText size={25} /></span><div><span>业务原始素材</span><h2>{project.material.exists ? '业务原始素材.md' : '尚未导入 Markdown 文件'}</h2><p>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 更新后可重新提取业务事实` : '请先将 PDF 和图片完整转换为 Markdown'}</p></div><button className="secondary" onClick={importMaterial} disabled={!!busy}>{busy === 'material' ? <LoaderCircle className="spin" size={17} /> : <FileText size={17} />}{project.material.exists ? '替换文件' : '导入文件'}</button></section><section className="asset-library surface-card"><div className="asset-tabs">{(Object.keys(labels) as AssetKind[]).map((key) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{labels[key][0]}<span>{project[key].length}</span></button>)}</div><div className="asset-toolbar"><div><h2>{labels[tab][0]}</h2><p>{batchKind ? '支持手动维护，也可使用 Excel 模板批量导入。' : '标题和正文必填，话题标签可选。'}</p></div><div className="asset-toolbar-actions">{batchKind && <><button className="secondary compact" onClick={() => downloadAssetTemplate(batchKind)} disabled={!!busy}>{busy === `template-${batchKind}` ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载模板</button><button className="secondary compact" onClick={() => importAssetBatch(batchKind)} disabled={!!busy}>{busy === `import-${batchKind}` ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}批量导入</button></>}<button className="primary compact" onClick={() => openAsset(tab)} disabled={!!busy}><Plus size={16} />新增{labels[tab][1]}</button></div></div>{items.length === 0 ? <div className="compact-empty tall"><Archive size={25} /><b>还没有{labels[tab][0]}</b><span>这类资料可以暂时留空，不会阻断生成流程。</span></div> : <AssetTable kind={tab} items={items} openAsset={openAsset} deleteAsset={deleteAsset} />}</section></>}</div>
 }
 
-function AssetRow({ kind, item, edit, remove }: { kind: AssetKind; item: Keyword | Rule | Reference; edit: () => void; remove: () => void }) {
-  const title = kind === 'keywords' ? (item as Keyword).value : kind === 'rules' ? (item as Rule).content : (item as Reference).title
-  const detail = kind === 'references' ? (item as Reference).body : item.note
-  const note = kind === 'references' ? ((item as Reference).author || (item as Reference).contentType || '—') : item.note || '—'
-  return <div className="asset-row"><code>{item.id}</code><div><b>{title}</b>{detail && <small>{detail}</small>}</div><span>{note}</span><div><button className="icon-button" title="编辑" onClick={edit}><PenLine size={15} /></button><button className="icon-button danger" title="删除" onClick={remove}><Trash2 size={15} /></button></div></div>
+const assetTableHeaders: Record<AssetKind, string[]> = {
+  keywords: ['编号', '分类', '核心关键词/词根', '词性标签', '痛点/意图标签', '建议用法(槽位)', '操作'],
+  rules: ['编号', '禁用词/敏感表述', '风险类型', '判定依据', '处理方式', '替代写法', '操作'],
+  references: ['编号', '标题', '正文', '话题标签', '操作'],
+}
+
+function displayCell(value?: string) { return value?.trim() || '—' }
+
+function AssetTable({ kind, items, openAsset, deleteAsset }: {
+  kind: AssetKind; items: (Keyword | Rule | Reference)[];
+  openAsset: (kind: AssetKind, item: Keyword | Rule | Reference) => void;
+  deleteAsset: (kind: AssetKind, id: string) => void;
+}) {
+  return <div className="asset-table-scroll"><table className={`asset-data-table ${kind}`}><thead><tr>{assetTableHeaders[kind].map((header) => <th key={header} scope="col">{header}</th>)}</tr></thead><tbody>{items.map((item) => <tr key={item.id}>{kind === 'keywords' ? <KeywordCells item={item as Keyword} /> : kind === 'rules' ? <RuleCells item={item as Rule} /> : <ReferenceCells item={item as Reference} />}<td className="asset-actions"><div><button className="icon-button" title="编辑" aria-label={`编辑 ${item.id}`} onClick={() => openAsset(kind, item)}><PenLine size={15} /></button><button className="icon-button danger" title="删除" aria-label={`删除 ${item.id}`} onClick={() => deleteAsset(kind, item.id)}><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
+}
+
+function KeywordCells({ item }: { item: Keyword }) {
+  return <><td className="asset-id"><code>{item.id}</code></td><td>{displayCell(item.category)}</td><td className="asset-primary">{displayCell(item.root)}</td><td>{displayCell(item.partOfSpeech)}</td><td>{displayCell(item.intentTag)}</td><td>{displayCell(item.suggestedUse)}</td></>
+}
+
+function RuleCells({ item }: { item: Rule }) {
+  return <><td className="asset-id"><code>{item.id}</code></td><td className="asset-primary">{displayCell(item.prohibited)}</td><td>{displayCell(item.riskType)}</td><td>{displayCell(item.basis)}</td><td>{displayCell(item.handling)}</td><td>{displayCell(item.replacement)}</td></>
+}
+
+function ReferenceCells({ item }: { item: Reference }) {
+  return <><td className="asset-id"><code>{item.id}</code></td><td className="asset-primary">{displayCell(item.title)}</td><td className="asset-long-text">{displayCell(item.body)}</td><td>{item.hashtags.length ? item.hashtags.map((tag) => `#${tag}`).join(' ') : '—'}</td></>
 }
 
 function SettingsPage({ settings, setSettings, save, busy }: { settings: ModelSettings; setSettings: (settings: ModelSettings) => void; save: () => void; busy: string }) {
@@ -342,7 +395,7 @@ function Overlays({ modal, setModal, pendingFolder, initialize, busy, error, set
   if (!modal) return null
   const close = () => { setModal(null); setError('') }
   const title = modal === 'project-init' ? '创建本地项目' : assetTab === 'keywords' ? '关键词' : assetTab === 'rules' ? '合规准则' : '参考文案'
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close() }}><div className="modal" role="dialog" aria-modal="true" aria-label={title}><div className="modal-head"><div><span>{modal === 'project-init' ? '项目初始化' : form.id ? '编辑记录' : '新增记录'}</span><h2>{title}</h2></div><button className="icon-button" onClick={close} aria-label="关闭"><X size={19} /></button></div>{modal === 'project-init' && <><div className="modal-copy"><span className="large-icon"><FolderOpen size={23} /></span><p>系统将在这个文件夹中创建项目配置、素材数据和生成结果：</p><code>{pendingFolder}</code><small>一个项目建议只对应一个业务，后续可以反复生成多篇文案。</small></div><div className="modal-actions"><button className="secondary" onClick={close}>取消</button><button className="primary" onClick={initialize} disabled={!!busy}>{busy === 'initialize' && <LoaderCircle className="spin" size={17} />}确认创建</button></div></>}{(modal === 'keywords' || modal === 'rules' || modal === 'references') && <><div className="form-stack">{form.id && <div className="immutable-id"><span>系统编号</span><code>{form.id}</code></div>}{modal === 'keywords' && <><label className="field"><span>关键词</span><input autoFocus value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} placeholder="输入一个关键词" /></label><label className="field"><span>备注 <small>可选</small></span><textarea rows={3} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></label></>}{modal === 'rules' && <><label className="field"><span>准则内容</span><textarea autoFocus rows={5} value={form.content} onChange={(e) => setForm({ ...form, content: e.target.value })} placeholder="一条完整、可执行的合规要求" /></label><label className="field"><span>备注 <small>可选</small></span><textarea rows={3} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></label></>}{modal === 'references' && <><label className="field"><span>标题</span><input autoFocus value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></label><label className="field"><span>完整正文</span><textarea rows={8} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} /></label><div className="form-grid"><label className="field"><span>作者 / 账号 <small>可选</small></span><input value={form.author} onChange={(e) => setForm({ ...form, author: e.target.value })} /></label><label className="field"><span>内容类型 <small>可选</small></span><input value={form.contentType} onChange={(e) => setForm({ ...form, contentType: e.target.value })} /></label><label className="field"><span>表现数据 <small>可选</small></span><input value={form.performance} onChange={(e) => setForm({ ...form, performance: e.target.value })} /></label><label className="field"><span>备注 <small>可选</small></span><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></label></div></>}</div><div className="modal-actions"><button className="secondary" onClick={close}>取消</button><button className="primary" onClick={saveAsset} disabled={!!busy}>{form.id ? '保存修改' : '新增记录'}</button></div></>}{error && <p className="modal-error">{error}</p>}</div></div>
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close() }}><div className="modal" role="dialog" aria-modal="true" aria-label={title}><div className="modal-head"><div><span>{modal === 'project-init' ? '项目初始化' : form.id ? '编辑记录' : '新增记录'}</span><h2>{title}</h2></div><button className="icon-button" onClick={close} aria-label="关闭"><X size={19} /></button></div>{modal === 'project-init' && <><div className="modal-copy"><span className="large-icon"><FolderOpen size={23} /></span><p>系统将在这个文件夹中创建项目配置、素材数据和生成结果：</p><code>{pendingFolder}</code><small>一个项目建议只对应一个业务，后续可以反复生成多篇文案。</small></div><div className="modal-actions"><button className="secondary" onClick={close}>取消</button><button className="primary" onClick={initialize} disabled={!!busy}>{busy === 'initialize' && <LoaderCircle className="spin" size={17} />}确认创建</button></div></>}{(modal === 'keywords' || modal === 'rules' || modal === 'references') && <><div className="form-stack">{form.id && <div className="immutable-id"><span>系统编号</span><code>{form.id}</code></div>}{modal === 'keywords' && <><div className="form-grid"><label className="field"><span>分类 <small>可选</small></span><input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} /></label><label className="field"><span>核心关键词/词根</span><input autoFocus value={form.root} onChange={(e) => setForm({ ...form, root: e.target.value })} /></label><label className="field"><span>词性标签 <small>可选</small></span><input value={form.partOfSpeech} onChange={(e) => setForm({ ...form, partOfSpeech: e.target.value })} /></label><label className="field"><span>痛点/意图标签 <small>可选</small></span><input value={form.intentTag} onChange={(e) => setForm({ ...form, intentTag: e.target.value })} /></label></div><label className="field"><span>建议用法(槽位) <small>可选</small></span><textarea rows={3} value={form.suggestedUse} onChange={(e) => setForm({ ...form, suggestedUse: e.target.value })} /></label></>}{modal === 'rules' && <><label className="field"><span>禁用词/敏感表述</span><textarea autoFocus rows={3} value={form.prohibited} onChange={(e) => setForm({ ...form, prohibited: e.target.value })} /></label><div className="form-grid"><label className="field"><span>风险类型 <small>可选</small></span><input value={form.riskType} onChange={(e) => setForm({ ...form, riskType: e.target.value })} /></label><label className="field"><span>判定依据 <small>可选</small></span><input value={form.basis} onChange={(e) => setForm({ ...form, basis: e.target.value })} /></label><label className="field"><span>处理方式 <small>可选</small></span><input value={form.handling} onChange={(e) => setForm({ ...form, handling: e.target.value })} /></label><label className="field"><span>替代写法 <small>可选</small></span><input value={form.replacement} onChange={(e) => setForm({ ...form, replacement: e.target.value })} /></label></div></>}{modal === 'references' && <><label className="field"><span>标题</span><input autoFocus value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></label><label className="field"><span>正文</span><textarea rows={8} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} /></label><label className="field"><span>话题标签 <small>可选，用空格、逗号或换行分隔</small></span><textarea rows={3} value={form.hashtags} onChange={(e) => setForm({ ...form, hashtags: e.target.value })} placeholder="#亲子研学 #佛山周末" /></label></>}</div><div className="modal-actions"><button className="secondary" onClick={close}>取消</button><button className="primary" onClick={saveAsset} disabled={!!busy}>{form.id ? '保存修改' : '新增记录'}</button></div></>}{error && <p className="modal-error">{error}</p>}</div></div>
 }
 
 function Toast({ error, notice, clear }: { error: string; notice: string; clear: () => void }) {

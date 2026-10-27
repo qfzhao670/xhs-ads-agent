@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('workshop', {
   getProject: () => ipcRenderer.invoke('project:get'),
   saveAsset: (kind, value) => ipcRenderer.invoke('asset:save', kind, value),
   deleteAsset: (kind, id) => ipcRenderer.invoke('asset:delete', kind, id),
+  downloadAssetTemplate: (kind) => ipcRenderer.invoke('asset:template', kind),
+  importAssetBatch: (kind) => ipcRenderer.invoke('asset:import', kind),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
   extractFacts: (resolution) => ipcRenderer.invoke('workflow:facts', resolution),

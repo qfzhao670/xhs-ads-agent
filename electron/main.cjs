@@ -2,6 +2,13 @@ const { app, BrowserWindow, dialog, ipcMain } = require('electron')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const path = require('node:path')
+const {
+  assetMarkdownTables,
+  createTemplateXlsx,
+  normalizeAsset,
+  readXlsxRows,
+  rowsToAssets,
+} = require('./asset-utils.cjs')
 
 const MARKER = '小红书运营工坊.json'
 const DATA_DIR = '项目数据'
@@ -41,9 +48,9 @@ async function loadProject() {
   if (!meta) return null
   const materialFile = path.join(currentRoot, '业务原始素材.md')
   const materialExists = await exists(materialFile)
-  const keywords = await readJson(dataPath(assetFiles.keywords), [])
-  const references = await readJson(dataPath(assetFiles.references), [])
-  const rules = await readJson(dataPath(assetFiles.rules), [])
+  const keywords = (await readJson(dataPath(assetFiles.keywords), [])).map((item) => normalizeAsset('keywords', item))
+  const references = (await readJson(dataPath(assetFiles.references), [])).map((item) => normalizeAsset('references', item))
+  const rules = (await readJson(dataPath(assetFiles.rules), [])).map((item) => normalizeAsset('rules', item))
   const facts = await readJson(outputPath('业务事实.json'), null)
   const strategies = await readJson(outputPath('策略候选.json'), [])
   const selection = await readJson(outputPath('策略选择.json'), { selectedStrategyId: '', advice: '' })
@@ -122,13 +129,6 @@ async function callModel(system, user) {
   return parseModelJson(responseText(await response.json()))
 }
 
-function assetsForPrompt(project) {
-  return {
-    keywords: project.keywords.map(({ id, value, note }) => ({ id, value, note })),
-    references: project.references.map(({ id, title, body, author, contentType, performance, note }) => ({ id, title, body, author, contentType, performance, note })),
-    rules: project.rules.map(({ id, content, note }) => ({ id, content, note })),
-  }
-}
 const modelSystem = '你是严谨的小红书文案工作流引擎。只根据用户提供的信息工作，不得补充、猜测或虚构任何业务事实。必须只输出合法 JSON，不要输出 Markdown 代码块或解释。'
 
 async function initializeProject(folder) {
@@ -202,19 +202,71 @@ ipcMain.handle('asset:save', async (_event, kind, value) => {
     if (!currentRoot || !assetFiles[kind]) throw new Error('项目或资料类型无效')
     const items = await readJson(dataPath(assetFiles[kind]), [])
     const stamp = now()
+    const normalized = normalizeAsset(kind, value)
+    if (kind === 'keywords' && !normalized.root) throw new Error('核心关键词/词根为必填项')
+    if (kind === 'rules' && !normalized.prohibited) throw new Error('禁用词/敏感表述为必填项')
+    if (kind === 'references' && (!normalized.title || !normalized.body)) throw new Error('标题和正文为必填项')
     if (value.id) {
       const index = items.findIndex((item) => item.id === value.id)
       if (index < 0) throw new Error('没有找到要修改的记录')
-      items[index] = { ...items[index], ...value, id: items[index].id, updatedAt: stamp }
+      items[index] = { ...items[index], ...normalized, id: items[index].id, updatedAt: stamp }
     } else {
       const meta = await readMeta()
+      meta.counters = meta.counters || {}
       meta.counters[kind] = (meta.counters[kind] || 0) + 1
       const id = `${idPrefixes[kind]}-${String(meta.counters[kind]).padStart(4, '0')}`
-      items.push({ ...value, id, createdAt: stamp, updatedAt: stamp })
+      items.push({ ...normalized, id, createdAt: stamp, updatedAt: stamp })
       await writeMeta(meta)
     }
     await writeJson(dataPath(assetFiles[kind]), items)
     return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('asset:template', async (_event, kind) => {
+  try {
+    if (!['keywords', 'rules'].includes(kind)) throw new Error('该资料库没有批量导入模板')
+    const label = kind === 'keywords' ? '关键词库' : '合规准则'
+    const result = await dialog.showSaveDialog({
+      title: `下载${label}模板`,
+      defaultPath: `${label}-模板.xlsx`,
+      buttonLabel: '保存模板',
+      filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
+    })
+    if (result.canceled || !result.filePath) return { ok: false, error: '' }
+    await fsp.writeFile(result.filePath, createTemplateXlsx(kind))
+    return { ok: true, savedPath: result.filePath }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('asset:import', async (_event, kind) => {
+  try {
+    if (!currentRoot) throw new Error('请先创建或打开项目')
+    if (!['keywords', 'rules'].includes(kind)) throw new Error('该资料库不支持 Excel 批量导入')
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
+      title: kind === 'keywords' ? '导入关键词库' : '导入合规准则',
+      buttonLabel: '导入',
+    })
+    if (result.canceled) return { ok: false, error: '' }
+    const imported = rowsToAssets(kind, readXlsxRows(await fsp.readFile(result.filePaths[0])))
+    const items = await readJson(dataPath(assetFiles[kind]), [])
+    const meta = await readMeta()
+    meta.counters = meta.counters || {}
+    const stamp = now()
+    const records = imported.map((item) => {
+      meta.counters[kind] = (meta.counters[kind] || 0) + 1
+      return {
+        ...item,
+        id: `${idPrefixes[kind]}-${String(meta.counters[kind]).padStart(4, '0')}`,
+        createdAt: stamp,
+        updatedAt: stamp,
+      }
+    })
+    await writeMeta(meta)
+    await writeJson(dataPath(assetFiles[kind]), [...items, ...records])
+    return { ok: true, imported: records.length, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
 })
 ipcMain.handle('asset:delete', async (_event, kind, id) => {
@@ -257,8 +309,8 @@ ipcMain.handle('workflow:strategies', async () => {
   try {
     const project = await loadProject()
     if (!project?.facts || project.facts.conflicts?.length) throw new Error('请先形成无冲突的完整业务事实')
-    const assets = assetsForPrompt(project)
-    const prompt = `根据完整业务事实和项目现有资产，一次性理解全部输入并生成 3–5 个彼此明显不同的文案策略。每个策略只引用真正适合的 1–3 篇参考文案，上限 3 篇；没有合适参考时使用空数组。referenceIds 只能使用给出的稳定编号。每个策略务必简短。\n\n业务事实：${JSON.stringify(project.facts)}\n关键词库：${JSON.stringify(assets.keywords)}\n参考文案库：${JSON.stringify(assets.references)}\n合规准则：${JSON.stringify(assets.rules)}\n\n输出对象格式：{"strategies":[{"name":"策略名称","angle":"一句话核心切入角度","materialPoints":["素材点，2–4个"],"route":"一句话写作路线","referenceIds":["REF-0001"],"bestFor":"最适合的目标"}]}`
+    const assets = assetMarkdownTables(project)
+    const prompt = `根据完整业务事实和项目现有资产，一次性理解全部输入并生成 3–5 个彼此明显不同的文案策略。每个策略只引用真正适合的 1–3 篇参考文案，上限 3 篇；没有合适参考时使用空数组。referenceIds 只能使用给出的稳定编号。每个策略务必简短。\n\n业务事实：${JSON.stringify(project.facts)}\n\n## 关键词库\n\n${assets.keywords}\n\n## 参考文案库\n\n${assets.references}\n\n## 合规准则\n\n${assets.rules}\n\n输出对象格式：{"strategies":[{"name":"策略名称","angle":"一句话核心切入角度","materialPoints":["素材点，2–4个"],"route":"一句话写作路线","referenceIds":["REF-0001"],"bestFor":"最适合的目标"}]}`
     const result = await callModel(modelSystem, prompt)
     const raw = Array.isArray(result.strategies) ? result.strategies.slice(0, 5) : []
     if (raw.length < 3) throw new Error('模型返回的有效策略少于 3 个，请重试')
@@ -328,10 +380,11 @@ async function makeDraft(revisionRequest = '') {
   const strategy = project.strategies.find((item) => item.id === project.selectedStrategyId)
   if (!strategy) throw new Error('所选策略已不存在')
   const selectedReferences = project.references.filter((item) => strategy.referenceIds.includes(item.id))
+  const assets = assetMarkdownTables(project, selectedReferences)
   const base = revisionRequest && project.currentDraft
     ? `请在保持同一策略的前提下修改当前终稿。\n当前终稿：${JSON.stringify(project.currentDraft)}\n新的修改要求：${revisionRequest}`
     : '请根据选定策略直接生成终稿。'
-  const prompt = `${base}\n\n只能使用以下业务事实：${JSON.stringify(project.facts)}\n选定的唯一策略：${JSON.stringify(strategy)}\n用户最初补充建议：${project.advice || '无'}\n关键词库：${JSON.stringify(project.keywords.map(({ id, value, note }) => ({ id, value, note })))}\n合规准则：${JSON.stringify(project.rules.map(({ id, content, note }) => ({ id, content, note })))}\n只可参考以下已选中的完整参考文案：${JSON.stringify(selectedReferences)}\n\n遵循策略的核心主题和信息取舍；关键词自然融入，不机械堆砌；参考文案只模仿选题方式、钩子、结构、节奏和语感，不复制原句或业务信息；遵守合规准则。输出对象格式：{"title":"标题","body":"正文","hashtags":["话题标签，不含#"]}`
+  const prompt = `${base}\n\n只能使用以下业务事实：${JSON.stringify(project.facts)}\n选定的唯一策略：${JSON.stringify(strategy)}\n用户最初补充建议：${project.advice || '无'}\n\n## 关键词库\n\n${assets.keywords}\n\n## 合规准则\n\n${assets.rules}\n\n## 只可参考以下已选中的完整参考文案\n\n${assets.references}\n\n遵循策略的核心主题和信息取舍；关键词自然融入，不机械堆砌；参考文案只模仿选题方式、钩子、结构、节奏和语感，不复制原句或业务信息；遵守合规准则。输出对象格式：{"title":"标题","body":"正文","hashtags":["话题标签，不含#"]}`
   const result = await callModel(modelSystem, prompt)
   if (!result.title || !result.body) throw new Error('模型返回的终稿缺少标题或正文，请重试')
   const version = project.drafts.length + 1
