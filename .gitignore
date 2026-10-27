@@ -8,4 +8,12 @@ htmlcov/
 data/*.db
 data/*.sqlite*
 .idea/
+.DS_Store
+node_modules/
+dist/
+release/
+build/icon.iconset/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
 
