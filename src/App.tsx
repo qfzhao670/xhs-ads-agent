@@ -160,7 +160,7 @@ function App() {
 
       <main className="workspace">
         <header className="topbar">
-          <div><span className="mobile-brand"><Sparkles size={16} /></span><strong>{page === 'generate' ? '文案生成' : page === 'assets' ? '素材管理' : '设置'}</strong></div>
+          <div><span className="mobile-brand"><Sparkles size={16} /></span><strong>红薯文案工坊</strong></div>
           <button className="project-chip" onClick={chooseFolder}><FolderOpen size={15} /><span>{project?.meta.name || '选择项目'}</span><ChevronDown size={14} /></button>
         </header>
 
