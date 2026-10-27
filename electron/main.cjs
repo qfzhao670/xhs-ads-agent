@@ -119,7 +119,7 @@ async function callModel(system, user) {
     response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${value.apiKey}` },
-      body: JSON.stringify({ model: value.model, temperature: 0.45, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+      body: JSON.stringify({ model: value.model, temperature: 0.45, response_format: { type: 'json_object' }, enable_thinking: false, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
     })
   } catch (error) { throw new Error(`无法连接模型接口：${error.message}`) }
   if (!response.ok) {
