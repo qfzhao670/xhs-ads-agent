@@ -15,6 +15,7 @@ interface Window {
     extractFacts(resolution?: string): Promise<ApiResult>
     generateStrategies(): Promise<ApiResult>
     selectStrategy(id: string, advice: string): Promise<ApiResult>
+    startNewGeneration(): Promise<ApiResult>
     generateDraft(): Promise<ApiResult>
     reviseDraft(request: string): Promise<ApiResult>
     confirmDraft(): Promise<ApiResult>
@@ -35,10 +36,16 @@ type Conflict = { topic: string; versions: string[]; question: string }
 type Facts = { confirmedFacts: { category: string; items: string[] }[]; promotionalExpressions: string[]; conflicts: Conflict[]; generatedAt: string }
 type Strategy = { id: string; name: string; angle: string; materialPoints: string[]; route: string; referenceIds: string[]; bestFor: string }
 type Draft = { version: number; title: string; body: string; hashtags: string[]; strategyId: string; referenceIds: string[]; revisionRequest: string; createdAt: string; confirmed: boolean }
+type GenerationRecord = {
+  id: string; createdAt: string; archivedAt: string; strategies: Strategy[];
+  selectedStrategyId: string; advice: string; drafts: Draft[]
+}
 type ProjectData = {
   meta: { name: string; root: string; createdAt: string; updatedAt: string }
   material: { exists: boolean; name: string; content: string }
   keywords: Keyword[]; references: Reference[]; rules: Rule[]
   facts: Facts | null; strategies: Strategy[]; selectedStrategyId: string; advice: string
   drafts: Draft[]; currentDraft: Draft | null
+  currentGeneration: { id: string; createdAt: string }
+  generationHistory: GenerationRecord[]
 }

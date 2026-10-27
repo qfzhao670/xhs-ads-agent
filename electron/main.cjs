@@ -48,6 +48,8 @@ async function loadProject() {
   const strategies = await readJson(outputPath('策略候选.json'), [])
   const selection = await readJson(outputPath('策略选择.json'), { selectedStrategyId: '', advice: '' })
   const drafts = await readJson(outputPath('终稿版本.json'), [])
+  const generationHistory = await readJson(outputPath('生成记录.json'), [])
+  const currentGeneration = await readJson(outputPath('当前生成.json'), { id: 'GEN-0001', createdAt: meta.createdAt })
   return {
     meta: { name: meta.name, root: currentRoot, createdAt: meta.createdAt, updatedAt: meta.updatedAt },
     material: {
@@ -60,6 +62,8 @@ async function loadProject() {
     advice: selection.advice || '',
     drafts,
     currentDraft: drafts.length ? drafts[drafts.length - 1] : null,
+    currentGeneration,
+    generationHistory,
   }
 }
 
@@ -134,11 +138,13 @@ async function initializeProject(folder) {
   await fsp.mkdir(path.join(absolute, OUTPUT_DIR), { recursive: true })
   const meta = {
     schemaVersion: 1, name: cleanName(absolute), createdAt: now(), updatedAt: now(),
-    counters: { keywords: 0, references: 0, rules: 0, strategies: 0 },
+    counters: { keywords: 0, references: 0, rules: 0, strategies: 0, generations: 1 },
   }
   await writeJson(path.join(absolute, MARKER), meta)
   for (const file of Object.values(assetFiles)) await writeJson(path.join(absolute, DATA_DIR, file), [])
   currentRoot = absolute
+  await writeJson(outputPath('当前生成.json'), { id: 'GEN-0001', createdAt: now() })
+  await writeJson(outputPath('生成记录.json'), [])
   await addRecent(absolute)
   return loadProject()
 }
@@ -285,6 +291,37 @@ ipcMain.handle('workflow:select', async (_event, payload) => {
   } catch (error) { return { ok: false, error: error.message } }
 })
 
+ipcMain.handle('workflow:new', async () => {
+  try {
+    const project = await loadProject()
+    if (!project) throw new Error('请先创建或打开项目')
+    const hasProgress = project.strategies.length > 0 || project.drafts.length > 0 || project.selectedStrategyId
+    const history = [...project.generationHistory]
+    if (hasProgress) {
+      history.push({
+        id: project.currentGeneration.id,
+        createdAt: project.currentGeneration.createdAt,
+        archivedAt: now(),
+        strategies: project.strategies,
+        selectedStrategyId: project.selectedStrategyId,
+        advice: project.advice,
+        drafts: project.drafts,
+      })
+      await writeJson(outputPath('生成记录.json'), history)
+    }
+    const meta = await readMeta()
+    meta.counters = meta.counters || {}
+    meta.counters.generations = Math.max(Number(meta.counters.generations) || 1, history.length) + 1
+    const currentGeneration = { id: `GEN-${String(meta.counters.generations).padStart(4, '0')}`, createdAt: now() }
+    await writeMeta(meta)
+    await writeJson(outputPath('当前生成.json'), currentGeneration)
+    await writeJson(outputPath('策略候选.json'), [])
+    await writeJson(outputPath('策略选择.json'), { selectedStrategyId: '', advice: '' })
+    await writeJson(outputPath('终稿版本.json'), [])
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
 async function makeDraft(revisionRequest = '') {
   const project = await loadProject()
   if (!project?.selectedStrategyId) throw new Error('请先选择一个策略')
@@ -306,7 +343,7 @@ async function makeDraft(revisionRequest = '') {
   const drafts = [...project.drafts, draft]
   await writeJson(outputPath('终稿版本.json'), drafts)
   const markdown = `# ${draft.title}\n\n${draft.body}\n\n${draft.hashtags.map((tag) => `#${tag}`).join(' ')}\n`
-  await fsp.writeFile(outputPath(`终稿_v${version}.md`), markdown, 'utf8')
+  await fsp.writeFile(outputPath(`${project.currentGeneration.id}_终稿_v${version}.md`), markdown, 'utf8')
   return loadProject()
 }
 ipcMain.handle('workflow:draft', async () => {
@@ -325,7 +362,9 @@ ipcMain.handle('workflow:confirm', async () => {
     const drafts = project.drafts.map((item, index) => ({ ...item, confirmed: index === project.drafts.length - 1 }))
     await writeJson(outputPath('终稿版本.json'), drafts)
     const draft = drafts[drafts.length - 1]
-    await fsp.writeFile(outputPath('最终输出.md'), `# ${draft.title}\n\n${draft.body}\n\n${draft.hashtags.map((tag) => `#${tag}`).join(' ')}\n`, 'utf8')
+    const markdown = `# ${draft.title}\n\n${draft.body}\n\n${draft.hashtags.map((tag) => `#${tag}`).join(' ')}\n`
+    await fsp.writeFile(outputPath(`${project.currentGeneration.id}_最终输出.md`), markdown, 'utf8')
+    await fsp.writeFile(outputPath('最终输出.md'), markdown, 'utf8')
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
 })

@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('workshop', {
   extractFacts: (resolution) => ipcRenderer.invoke('workflow:facts', resolution),
   generateStrategies: () => ipcRenderer.invoke('workflow:strategies'),
   selectStrategy: (id, advice) => ipcRenderer.invoke('workflow:select', { id, advice }),
+  startNewGeneration: () => ipcRenderer.invoke('workflow:new'),
   generateDraft: () => ipcRenderer.invoke('workflow:draft'),
   reviseDraft: (request) => ipcRenderer.invoke('workflow:revise', request),
   confirmDraft: () => ipcRenderer.invoke('workflow:confirm'),
