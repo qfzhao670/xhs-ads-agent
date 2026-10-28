@@ -35,6 +35,12 @@
     "directories": {
       "output": "release"
     },
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
+    ],
     "electronDist": "node_modules/electron/dist",
     "files": [
       "dist/**/*",
@@ -42,13 +48,16 @@
       "package.json"
     ],
     "mac": {
+      "icon": "build/icon.png",
       "category": "public.app-category.productivity",
       "target": ["dmg", "zip"]
     },
     "win": {
+      "icon": "build/icon.png",
       "target": "nsis"
     },
     "linux": {
+      "icon": "build/icon.png",
       "target": "AppImage",
       "category": "Office"
     },

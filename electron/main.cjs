@@ -42,6 +42,11 @@ async function writeMeta(meta) {
   await writeJson(path.join(currentRoot, MARKER), meta)
 }
 function cleanName(folder) { return path.basename(folder).trim() || '未命名项目' }
+function applicationIconPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.png')
+    : path.join(__dirname, '..', 'build', 'icon.png')
+}
 
 async function loadProject() {
   if (!currentRoot) return null
@@ -218,6 +223,7 @@ async function initializeProject(folder) {
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440, height: 920, minWidth: 1080, minHeight: 700,
+    icon: applicationIconPath(),
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     backgroundColor: '#f3f1ed',
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false },
@@ -579,6 +585,7 @@ ipcMain.handle('workflow:confirm', async (_event, version) => {
 })
 
 app.whenReady().then(() => {
+  if (process.platform === 'darwin') app.dock.setIcon(applicationIconPath())
   createWindow()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })
