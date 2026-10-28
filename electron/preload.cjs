@@ -25,6 +25,11 @@ contextBridge.exposeInMainWorld('workshop', {
   reviseDraft: (request, version, thinking) => ipcRenderer.invoke('workflow:revise', request, version, thinking),
   saveManualDraft: (draft) => ipcRenderer.invoke('workflow:manual-save', draft),
   confirmDraft: (version) => ipcRenderer.invoke('workflow:confirm', version),
+  prepareImageBrief: (version) => ipcRenderer.invoke('image:prepare-brief', version),
+  generateImages: (version, brief) => ipcRenderer.invoke('image:generate', version, brief),
+  selectGeneratedImage: (taskId, imageId) => ipcRenderer.invoke('image:select', taskId, imageId),
+  readGeneratedImage: (relativePath) => ipcRenderer.invoke('image:read', relativePath),
+  exportGeneratedImage: (taskId, imageId) => ipcRenderer.invoke('image:export', taskId, imageId),
   onModelStream: (callback) => {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('model:stream', listener)

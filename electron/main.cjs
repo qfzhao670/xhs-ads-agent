@@ -1,4 +1,5 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain } = require('electron')
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const path = require('node:path')
@@ -10,10 +11,21 @@ const {
   readXlsxRows,
   rowsToAssets,
 } = require('./asset-utils.cjs')
+const {
+  DEFAULT_IMAGE_SETTINGS,
+  buildImageApiRequest,
+  buildNegativePrompt,
+  buildXhsImagePrompt,
+  formatImageApiError,
+  normalizeImageSettings,
+  parseImageApiResponse,
+  sanitizeImageBrief,
+} = require('./image-utils.cjs')
 
 const MARKER = '小红书运营工坊.json'
 const DATA_DIR = '项目数据'
 const OUTPUT_DIR = '生成结果'
+const IMAGE_TASKS_FILE = '配图记录.json'
 let currentRoot = ''
 
 const assetFiles = {
@@ -61,6 +73,7 @@ async function loadProject() {
   const strategies = await readJson(outputPath('策略候选.json'), [])
   const selection = await readJson(outputPath('策略选择.json'), { selectedStrategyIds: [], selectedStrategyId: '', strategyAdvice: {}, advice: '' })
   const drafts = await readJson(outputPath('终稿版本.json'), [])
+  const imageTasks = await readJson(outputPath(IMAGE_TASKS_FILE), [])
   const generationHistory = await readJson(outputPath('生成记录.json'), [])
   const currentGeneration = await readJson(outputPath('当前生成.json'), { id: 'GEN-0001', createdAt: meta.createdAt })
   return {
@@ -79,7 +92,7 @@ async function loadProject() {
       ? selection.strategyAdvice
       : selection.selectedStrategyId && selection.advice ? { [selection.selectedStrategyId]: selection.advice } : {},
     advice: selection.advice || '',
-    drafts,
+    drafts, imageTasks,
     currentDraft: drafts.length ? drafts[drafts.length - 1] : null,
     currentGeneration,
     generationHistory,
@@ -88,7 +101,16 @@ async function loadProject() {
 
 async function userConfig() {
   const file = path.join(app.getPath('userData'), 'settings.json')
-  return { file, value: await readJson(file, { baseUrl: 'https://api.openai.com/v1', apiKey: '', model: '' }) }
+  const stored = await readJson(file, {})
+  return {
+    file,
+    value: {
+      baseUrl: String(stored.baseUrl || 'https://api.openai.com/v1'),
+      apiKey: String(stored.apiKey || ''),
+      model: String(stored.model || ''),
+      image: normalizeImageSettings({ ...DEFAULT_IMAGE_SETTINGS, ...(stored.image || {}) }),
+    },
+  }
 }
 async function recentProjects() {
   const file = path.join(app.getPath('userData'), 'recent-projects.json')
@@ -192,6 +214,95 @@ async function callModel(system, user, onChunk = () => {}, thinking = false) {
   return parseModelJson(fullText)
 }
 
+async function callImageModel(brief) {
+  const { value } = await userConfig()
+  const settings = value.image
+  if (!settings.enabled) throw new Error('请先在“设置 → 图片模型”中启用图片生成功能')
+  if (!settings.apiKey || !settings.model || !settings.baseUrl) throw new Error('请完整填写图片模型的接口地址、API Key 和模型名称')
+  const prompt = buildXhsImagePrompt(brief)
+  const negativePrompt = buildNegativePrompt(brief)
+  const seed = crypto.randomInt(0, 2147483647)
+  const request = buildImageApiRequest(settings, prompt, negativePrompt, seed)
+  if (!request.endpoint) throw new Error('图片模型接口地址不是有效的 HTTP(S) URL')
+  const requestHost = new URL(request.endpoint).hostname
+  if (request.protocol === 'openai' && ['dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com'].includes(requestHost)) {
+    throw new Error('Qwen Image 的 OpenAI 兼容方式需要百炼 Workspace 专属域名；请改填 llm-….maas.aliyuncs.com，或选择 DashScope 同步协议')
+  }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 600_000)
+  let response
+  try {
+    response = await fetch(request.endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey}` },
+      signal: controller.signal,
+      body: JSON.stringify(request.body),
+    })
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('图片生成超过 10 分钟，已停止等待；请稍后重试')
+    throw new Error(`无法连接图片模型接口：${error.message}`)
+  } finally { clearTimeout(timeout) }
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(formatImageApiError(response.status, body, request.endpoint, settings.model))
+  }
+  const data = await response.json()
+  const parsed = parseImageApiResponse(data)
+  if (!parsed.urls.length) throw new Error(`图片模型没有返回可下载的图片地址：${JSON.stringify(data).slice(0, 500)}`)
+  return {
+    urls: parsed.urls,
+    prompt,
+    negativePrompt,
+    seed,
+    requestId: parsed.requestId || response.headers.get('x-request-id') || '',
+    usage: parsed.usage,
+    settings: { model: settings.model, size: settings.size, count: settings.count },
+  }
+}
+
+function projectRelative(file) { return path.relative(currentRoot, file).split(path.sep).join('/') }
+function resolveProjectFile(relativeFile) {
+  const absolute = path.resolve(currentRoot, String(relativeFile || ''))
+  const rootPrefix = `${path.resolve(currentRoot)}${path.sep}`
+  if (!absolute.startsWith(rootPrefix)) throw new Error('无效的项目文件路径')
+  return absolute
+}
+async function writeBuffer(file, buffer) {
+  await fsp.mkdir(path.dirname(file), { recursive: true })
+  const temporary = `${file}.tmp`
+  await fsp.writeFile(temporary, buffer)
+  await fsp.rename(temporary, file)
+}
+async function downloadGeneratedImage(url, file) {
+  const parsed = new URL(url)
+  if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error('图片模型返回了不支持的下载地址')
+  const response = await fetch(parsed)
+  if (!response.ok) throw new Error(`下载生成图片失败：HTTP ${response.status}`)
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType && !contentType.startsWith('image/') && contentType !== 'application/octet-stream') throw new Error('图片模型返回的文件格式不正确')
+  const buffer = Buffer.from(await response.arrayBuffer())
+  if (!buffer.length) throw new Error('下载到的生成图片为空')
+  if (buffer.length > 30 * 1024 * 1024) throw new Error('生成图片超过 30MB，已停止保存')
+  await writeBuffer(file, buffer)
+}
+async function saveImageTasks(tasks) { await writeJson(outputPath(IMAGE_TASKS_FILE), tasks) }
+async function saveImageTaskArtifacts(task) {
+  const folder = resolveProjectFile(task.artifactDir)
+  await fsp.mkdir(folder, { recursive: true })
+  await writeJson(path.join(folder, 'brief.json'), task.brief)
+  await fsp.writeFile(path.join(folder, 'prompt.txt'), `${task.prompt || ''}\n`, 'utf8')
+  await fsp.writeFile(path.join(folder, 'negative-prompt.txt'), `${task.negativePrompt || ''}\n`, 'utf8')
+  await writeJson(path.join(folder, 'metadata.json'), {
+    id: task.id,
+    generationId: task.generationId,
+    strategyId: task.strategyId,
+    draftVersion: task.draftVersion,
+    selectedImageId: task.selectedImageId,
+    images: task.images,
+    updatedAt: task.updatedAt,
+  })
+}
+
 function modelStream(event, operation) {
   event.sender.send('model:stream', { operation, reset: true, chunk: '' })
   return (kind, chunk) => event.sender.send('model:stream', { operation, kind, chunk })
@@ -216,6 +327,7 @@ async function initializeProject(folder) {
   currentRoot = absolute
   await writeJson(outputPath('当前生成.json'), { id: 'GEN-0001', createdAt: now() })
   await writeJson(outputPath('生成记录.json'), [])
+  await writeJson(outputPath(IMAGE_TASKS_FILE), [])
   await addRecent(absolute)
   return loadProject()
 }
@@ -399,7 +511,12 @@ ipcMain.handle('clipboard:read-text', () => clipboard.readText())
 ipcMain.handle('settings:save', async (_event, settings) => {
   try {
     const { file } = await userConfig()
-    await writeJson(file, { baseUrl: String(settings.baseUrl || '').trim(), apiKey: String(settings.apiKey || '').trim(), model: String(settings.model || '').trim() })
+    await writeJson(file, {
+      baseUrl: String(settings.baseUrl || '').trim(),
+      apiKey: String(settings.apiKey || '').trim(),
+      model: String(settings.model || '').trim(),
+      image: normalizeImageSettings(settings.image),
+    })
     return { ok: true }
   } catch (error) { return { ok: false, error: error.message } }
 })
@@ -488,6 +605,7 @@ ipcMain.handle('workflow:new', async () => {
         strategyAdvice: project.strategyAdvice,
         advice: project.advice,
         drafts: project.drafts,
+        imageTasks: project.imageTasks,
       })
       await writeJson(outputPath('生成记录.json'), history)
     }
@@ -500,6 +618,7 @@ ipcMain.handle('workflow:new', async () => {
     await writeJson(outputPath('策略候选.json'), [])
     await writeJson(outputPath('策略选择.json'), { selectedStrategyIds: [], selectedStrategyId: '', strategyAdvice: {}, advice: '' })
     await writeJson(outputPath('终稿版本.json'), [])
+    await writeJson(outputPath(IMAGE_TASKS_FILE), [])
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
 })
@@ -582,6 +701,133 @@ ipcMain.handle('workflow:confirm', async (_event, version) => {
     await fsp.writeFile(outputPath(`${project.currentGeneration.id}_最终输出_v${draft.version}.md`), markdown, 'utf8')
     await fsp.writeFile(outputPath('最终输出.md'), markdown, 'utf8')
     return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('image:prepare-brief', async (_event, version) => {
+  try {
+    const project = await loadProject()
+    const draft = project?.drafts.find((item) => item.version === Number(version) && item.confirmed)
+    if (!draft) throw new Error('请先确认这篇文案，再生成图片策划')
+    const strategy = project.strategies.find((item) => item.id === draft.strategyId)
+    const rules = project.rules.filter((item) => item.enabled !== false)
+    const prompt = `请为以下已确认的小红书文案生成一份宣传首图策划。只能使用给出的事实和文案信息，不得虚构产品、人物、地点、权益、价格、资质、奖项或效果。封面标题建议 6–12 个中文字符，最多 16 个；副标题可为空。style 只能从 lifestyle、event、product、guide、editorial 中选择。palette、mustShow、mustAvoid 都是简短字符串数组。\n\n业务事实：${JSON.stringify(project.facts)}\n选定策略：${JSON.stringify(strategy)}\n已确认文案：${JSON.stringify(draft)}\n合规准则：${JSON.stringify(rules)}\n\n输出对象格式：{"purpose":"小红书图文笔记首图","coverTitle":"封面短标题","subtitle":"可选短副标题","style":"lifestyle","subject":"具体画面主体","scene":"具体场景、动作、光线与道具","composition":"主体位置与标题留白位置","palette":["颜色1","颜色2"],"mood":"整体氛围","mustShow":["必须出现的内容"],"mustAvoid":["不得出现的内容"],"extraNotes":"其他必要说明"}`
+    const result = await callModel(modelSystem, prompt, () => {}, false)
+    const brief = sanitizeImageBrief(result, draft.title)
+    const tasks = [...project.imageTasks]
+    const taskId = `IMG-${project.currentGeneration.id}-${draft.strategyId}-V${draft.version}`
+    const index = tasks.findIndex((item) => item.id === taskId)
+    const previous = index >= 0 ? tasks[index] : null
+    const artifactDir = projectRelative(path.join(outputPath('配图'), project.currentGeneration.id, `${draft.strategyId}_v${draft.version}`))
+    const task = {
+      id: taskId,
+      generationId: project.currentGeneration.id,
+      strategyId: draft.strategyId,
+      draftVersion: draft.version,
+      brief,
+      prompt: previous?.prompt || '',
+      negativePrompt: previous?.negativePrompt || '',
+      artifactDir,
+      images: previous?.images || [],
+      selectedImageId: previous?.selectedImageId || '',
+      createdAt: previous?.createdAt || now(),
+      updatedAt: now(),
+    }
+    if (index >= 0) tasks[index] = task
+    else tasks.push(task)
+    await saveImageTasks(tasks)
+    await saveImageTaskArtifacts(task)
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('image:generate', async (_event, version, rawBrief) => {
+  try {
+    const project = await loadProject()
+    const draft = project?.drafts.find((item) => item.version === Number(version) && item.confirmed)
+    if (!draft) throw new Error('请先确认这篇文案，再生成宣传图片')
+    const taskIndex = project.imageTasks.findIndex((item) => item.draftVersion === draft.version && item.strategyId === draft.strategyId)
+    if (taskIndex < 0) throw new Error('请先生成图片策划')
+    const brief = sanitizeImageBrief(rawBrief, draft.title)
+    if (!brief.coverTitle) throw new Error('封面标题不能为空')
+    const generated = await callImageModel(brief)
+    const task = { ...project.imageTasks[taskIndex] }
+    const batchId = Date.now()
+    const folder = resolveProjectFile(task.artifactDir)
+    const candidates = generated.urls.map((url, index) => {
+      const id = `${task.id}-${batchId}-${index + 1}`
+      const file = path.join(folder, `candidate-${batchId}-${String(index + 1).padStart(2, '0')}.png`)
+      return { id, sourceUrl: url, file, index }
+    })
+    await Promise.all(candidates.map((item) => downloadGeneratedImage(item.sourceUrl, item.file)))
+    const createdAt = now()
+    const images = candidates.map((item) => ({
+      id: item.id,
+      relativePath: projectRelative(item.file),
+      createdAt,
+      model: generated.settings.model,
+      size: generated.settings.size,
+      seed: generated.seed,
+      requestId: generated.requestId,
+      prompt: generated.prompt,
+      negativePrompt: generated.negativePrompt,
+    }))
+    task.brief = brief
+    task.prompt = generated.prompt
+    task.negativePrompt = generated.negativePrompt
+    task.images = [...(task.images || []), ...images]
+    task.updatedAt = createdAt
+    const tasks = [...project.imageTasks]
+    tasks[taskIndex] = task
+    await saveImageTasks(tasks)
+    await saveImageTaskArtifacts(task)
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('image:select', async (_event, taskId, imageId) => {
+  try {
+    const project = await loadProject()
+    const index = project?.imageTasks.findIndex((item) => item.id === String(taskId)) ?? -1
+    if (index < 0) throw new Error('没有找到配图任务')
+    const task = { ...project.imageTasks[index] }
+    if (!task.images.some((item) => item.id === String(imageId))) throw new Error('没有找到要选择的图片')
+    task.selectedImageId = String(imageId)
+    task.updatedAt = now()
+    const tasks = [...project.imageTasks]
+    tasks[index] = task
+    await saveImageTasks(tasks)
+    await saveImageTaskArtifacts(task)
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('image:read', async (_event, relativePath) => {
+  try {
+    const file = resolveProjectFile(relativePath)
+    const buffer = await fsp.readFile(file)
+    const extension = path.extname(file).toLowerCase()
+    const mime = extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : extension === '.webp' ? 'image/webp' : 'image/png'
+    return { ok: true, imageUrl: `data:${mime};base64,${buffer.toString('base64')}` }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('image:export', async (_event, taskId, imageId) => {
+  try {
+    const project = await loadProject()
+    const task = project?.imageTasks.find((item) => item.id === String(taskId))
+    const image = task?.images.find((item) => item.id === String(imageId))
+    if (!task || !image) throw new Error('没有找到要导出的图片')
+    const draft = project.drafts.find((item) => item.version === task.draftVersion)
+    const safeTitle = String(draft?.title || '小红书封面').replace(/[\\/:*?"<>|]/g, '-').slice(0, 40)
+    const result = await dialog.showSaveDialog({
+      title: '导出小红书封面',
+      defaultPath: `${safeTitle}.png`,
+      filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+    })
+    if (result.canceled || !result.filePath) return { ok: true }
+    await fsp.copyFile(resolveProjectFile(image.relativePath), result.filePath)
+    return { ok: true, savedPath: result.filePath }
   } catch (error) { return { ok: false, error: error.message } }
 })
 

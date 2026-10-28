@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive, BookOpenText, Brain, Check, CheckCircle2, ChevronDown, ChevronRight,
-  Circle, ClipboardPaste, Download, Eye, EyeOff, FileText, FolderOpen, KeyRound, LayoutTemplate, LoaderCircle,
+  Circle, ClipboardPaste, Download, Eye, EyeOff, FileText, FolderOpen, Image as ImageIcon, ImagePlus, KeyRound, LayoutTemplate, LoaderCircle,
   PackageOpen, PenLine, Plus, RefreshCw, Save, Scale, Settings, SlidersHorizontal,
   Sparkles, Trash2, Upload, WandSparkles, X,
 } from 'lucide-react'
@@ -14,8 +14,31 @@ const flowSteps = [
   ['核对事实', '提取并消除冲突'],
   ['选择策略', '确定一个或多个方向'],
   ['生成文案', '按策略逐篇产出'],
-  ['审核确认', '修改、确认并归档'],
+  ['审核确认', '修改并确认终稿'],
+  ['制作配图', '生成并选择封面'],
 ] as const
+
+const defaultImageSettings: ImageModelSettings = {
+  enabled: false, protocol: 'dashscope', baseUrl: '', apiKey: '', model: 'qwen-image-3.0-pro', size: '1080x1440', count: 3,
+  promptExtendMode: 'agent', enableThinking: true, watermark: false,
+}
+
+function resolvedImageEndpoint(settings: ImageModelSettings) {
+  try {
+    const parsed = new URL(settings.baseUrl.trim())
+    if (!['http:', 'https:'].includes(parsed.protocol)) return ''
+    const origin = parsed.origin
+    return settings.protocol === 'openai'
+      ? `${origin}/compatible-mode/v1/images/generations`
+      : `${origin}/api/v1/services/aigc/multimodal-generation/generation`
+  } catch { return '' }
+}
+
+function usesPublicDashScopeDomain(baseUrl: string) {
+  try {
+    return ['dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com'].includes(new URL(baseUrl.trim()).hostname)
+  } catch { return false }
+}
 
 const emptyForms = {
   keywords: { id: '', category: '', root: '', partOfSpeech: '', intentTag: '', suggestedUse: '' },
@@ -36,7 +59,7 @@ function App() {
   const [notice, setNotice] = useState('')
   const [assetTab, setAssetTab] = useState<AssetKind>('keywords')
   const [form, setForm] = useState<Record<string, string>>(emptyForms.keywords)
-  const [settings, setSettings] = useState<ModelSettings>({ baseUrl: '', apiKey: '', model: '' })
+  const [settings, setSettings] = useState<ModelSettings>({ baseUrl: '', apiKey: '', model: '', image: defaultImageSettings })
   const [resolution, setResolution] = useState('')
   const [choice, setChoice] = useState<string[]>([])
   const [strategyAdvice, setStrategyAdvice] = useState<Record<string, string>>({})
@@ -75,9 +98,15 @@ function App() {
     !!project?.selectedStrategyIds.length,
     !!project?.currentDraft,
     !!project?.selectedStrategyIds.length && project.selectedStrategyIds.every((id) => project.drafts.some((draft) => draft.strategyId === id && draft.confirmed)),
+    !!project?.selectedStrategyIds.length && project.selectedStrategyIds.every((id) => {
+      const draft = project.drafts.find((item) => item.strategyId === id && item.confirmed)
+      return !!draft && project.imageTasks.some((task) => task.draftVersion === draft.version && Boolean(task.selectedImageId))
+    }),
   ], [project])
 
   function suggestedStep(data: ProjectData) {
+    const allConfirmed = data.selectedStrategyIds.length > 0 && data.selectedStrategyIds.every((id) => data.drafts.some((draft) => draft.strategyId === id && draft.confirmed))
+    if (allConfirmed) return 6
     if (data.currentDraft) return 5
     if (data.selectedStrategyIds.length) return 4
     if (data.strategies.length) return 3
@@ -174,6 +203,12 @@ function App() {
   }
   async function saveSettings() {
     if (!settings.baseUrl || !settings.apiKey || !settings.model) { setError('请完整填写接口地址、API Key 和模型名称'); return }
+    if (settings.image.enabled && (!settings.image.baseUrl || !settings.image.apiKey || !settings.image.model)) { setError('请完整填写图片模型的接口地址、API Key 和模型名称'); return }
+    if (settings.image.enabled && !resolvedImageEndpoint(settings.image)) { setError('图片模型接口地址不是有效的 HTTP(S) URL'); return }
+    if (settings.image.enabled && settings.image.protocol === 'openai' && usesPublicDashScopeDomain(settings.image.baseUrl)) {
+      setError('Qwen Image 的 OpenAI 兼容方式需要百炼 Workspace 专属域名；请改填 llm-….maas.aliyuncs.com，或选择 DashScope 同步协议')
+      return
+    }
     await run('settings', () => window.workshop.saveSettings(settings), '模型设置已保存')
   }
   async function newGeneration() {
@@ -216,7 +251,7 @@ function App() {
         {page === 'generate' && <GenerationPage
           project={project} recent={recent} openRecent={openRecent} chooseFolder={chooseFolder}
           flowStep={flowStep} setFlowStep={setFlowStep} completed={completed}
-          viewGeneration={viewGeneration} setViewGeneration={(id) => { setViewGeneration(id); setFlowStep(id === 'current' && project ? suggestedStep(project) : 5) }} archived={archived}
+          viewGeneration={viewGeneration} setViewGeneration={(id) => { setViewGeneration(id); setFlowStep(id === 'current' && project ? suggestedStep(project) : project?.generationHistory.find((item) => item.id === id)?.imageTasks?.length ? 6 : 5) }} archived={archived}
           newGeneration={newGeneration} busy={busy} setPage={setPage}
           stream={stream}
           resolution={resolution} setResolution={setResolution}
@@ -232,6 +267,10 @@ function App() {
           revise={async () => { if (!viewVersion) return; const ok = await run('revise', () => window.workshop.reviseDraft(revision, viewVersion, thinkingModes.revise), '修改版本已生成'); if (ok) setRevision('') }}
           saveManual={async (value) => { const ok = await run('manual', () => window.workshop.saveManualDraft(value), '手动修改已保存为新版本'); return ok }}
           confirm={(version) => run('confirm', () => window.workshop.confirmDraft(version), '当前文案已确认')}
+          prepareImageBrief={(version) => run('image-brief', () => window.workshop.prepareImageBrief(version), '图片策划已生成')}
+          generateImages={(version, brief) => run('image-generate', () => window.workshop.generateImages(version, brief), '宣传图片已生成并保存到项目')}
+          selectImage={(taskId, imageId) => run('image-select', () => window.workshop.selectGeneratedImage(taskId, imageId), '已选为本篇封面')}
+          exportImage={async (taskId, imageId) => { const result = await window.workshop.exportGeneratedImage(taskId, imageId); if (!result.ok) showError(result.error); else if (result.savedPath) flash('封面已导出') }}
         />}
         {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} exportMaterial={exportMaterial} downloadAssetTemplate={downloadAssetTemplate} importAssetBatch={importAssetBatch} exportAsset={exportAsset} busy={busy} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={(kind, id, enabled) => run('toggle-asset', () => window.workshop.toggleAsset(kind, id, enabled))} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
         {page === 'settings' && <SettingsPage settings={settings} setSettings={setSettings} save={saveSettings} busy={busy} />}
@@ -264,18 +303,25 @@ type GenerationPageProps = {
   revision: string; setRevision: (value: string) => void; revise: () => void;
   saveManual: (draft: { version: number; title: string; body: string; hashtags: string }) => Promise<boolean>;
   confirm: (version: number) => void;
+  prepareImageBrief: (version: number) => Promise<boolean>; generateImages: (version: number, brief: ImageBrief) => Promise<boolean>;
+  selectImage: (taskId: string, imageId: string) => Promise<boolean>; exportImage: (taskId: string, imageId: string) => void;
 }
 
 function archivedCompleted(record: GenerationRecord) {
   const selectedIds = record.selectedStrategyIds || (record.selectedStrategyId ? [record.selectedStrategyId] : [])
   const hasDraft = record.drafts.length > 0
   const allConfirmed = selectedIds.length > 0 && selectedIds.every((id) => record.drafts.some((draft) => draft.strategyId === id && draft.confirmed))
+  const allIllustrated = selectedIds.length > 0 && selectedIds.every((id) => {
+    const draft = record.drafts.find((item) => item.strategyId === id && item.confirmed)
+    return !!draft && Boolean(record.imageTasks?.some((task) => task.draftVersion === draft.version && task.selectedImageId))
+  })
   return [
     Boolean(record.material?.exists || record.facts || record.strategies.length || hasDraft),
     Boolean((record.facts && !record.facts.conflicts.length) || record.strategies.length || hasDraft),
     selectedIds.length > 0 || hasDraft,
     hasDraft,
     allConfirmed || Boolean(record.drafts.some((draft) => draft.confirmed) && !record.selectedStrategyIds?.length),
+    allIllustrated,
   ]
 }
 
@@ -324,7 +370,8 @@ function CurrentFlow(props: GenerationPageProps) {
   if (flowStep === 2) return <FactsStep project={project} busy={props.busy} resolution={props.resolution} setResolution={props.setResolution} thinking={props.thinkingModes.facts} setThinking={(value) => props.setThinkingMode('facts', value)} generate={props.generateFacts} next={() => props.setFlowStep(3)} />
   if (flowStep === 3) return <StrategyStep project={project} busy={props.busy} thinking={props.thinkingModes.strategies} setThinking={(value) => props.setThinkingMode('strategies', value)} generate={props.generateStrategies} choice={props.choice} setChoice={props.setChoice} strategyAdvice={props.strategyAdvice} setStrategyAdvice={props.setStrategyAdvice} save={props.saveStrategy} />
   if (flowStep === 4) return <ComposeStep project={project} strategies={props.selectedStrategies} busy={props.busy} thinking={props.thinkingModes.draft} setThinking={(value) => props.setThinkingMode('draft', value)} generate={props.generateDraft} back={() => props.setFlowStep(3)} />
-  return <ReviewStep key={props.draft?.version ?? 'empty'} project={project} draft={props.draft} viewVersion={props.viewVersion} setViewVersion={props.setViewVersion} revision={props.revision} setRevision={props.setRevision} busy={props.busy} thinking={props.thinkingModes.revise} setThinking={(value) => props.setThinkingMode('revise', value)} revise={props.revise} saveManual={props.saveManual} confirm={props.confirm} newGeneration={props.newGeneration} />
+  if (flowStep === 5) return <ReviewStep key={props.draft?.version ?? 'empty'} project={project} draft={props.draft} viewVersion={props.viewVersion} setViewVersion={props.setViewVersion} revision={props.revision} setRevision={props.setRevision} busy={props.busy} thinking={props.thinkingModes.revise} setThinking={(value) => props.setThinkingMode('revise', value)} revise={props.revise} saveManual={props.saveManual} confirm={props.confirm} goImages={() => props.setFlowStep(6)} />
+  return <ImageStep project={project} busy={props.busy} prepareBrief={props.prepareImageBrief} generateImages={props.generateImages} selectImage={props.selectImage} exportImage={props.exportImage} newGeneration={props.newGeneration} />
 }
 
 function StepHeader({ step, title, children, action }: { step: string; title: string; children: React.ReactNode; action?: React.ReactNode }) {
@@ -333,7 +380,7 @@ function StepHeader({ step, title, children, action }: { step: string; title: st
 
 function SourceStep({ project, goAssets, next }: { project: ProjectData; goAssets: () => void; next: () => void }) {
   return <section className="flow-panel surface-card">
-    <StepHeader step="步骤 1 / 5" title="确认本轮生成依据">素材可以在项目内长期积累；开始前确认原始素材与增强资料是否已就绪。</StepHeader>
+    <StepHeader step="步骤 1 / 6" title="确认本轮生成依据">素材可以在项目内长期积累；开始前确认原始素材与增强资料是否已就绪。</StepHeader>
     <div className={`source-file ${project.material.exists ? 'ready' : ''}`}><span className="list-icon"><FileText size={20} /></span><div><b>{project.material.exists ? '业务原始素材.md' : '尚未导入业务原始素材'}</b><small>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 可用于事实提取` : '原始素材是生成流程的必需输入'}</small></div><span className="status-label">{project.material.exists ? '已就绪' : '待补充'}</span></div>
     <div className="asset-summary"><div><span>关键词</span><b>{project.keywords.length}</b><small>条</small></div><div><span>参考文案</span><b>{project.references.length}</b><small>篇</small></div><div><span>合规准则</span><b>{project.rules.length}</b><small>条</small></div></div>
     <div className="panel-actions"><button className="secondary" onClick={goAssets}><SlidersHorizontal size={17} />管理素材</button><button className="primary" onClick={next} disabled={!project.material.exists}>继续核对事实<ChevronRight size={17} /></button></div>
@@ -347,7 +394,7 @@ function ThinkingToggle({ checked, onChange, recommended = false, disabled = fal
 function FactsStep({ project, busy, resolution, setResolution, thinking, setThinking, generate, next }: { project: ProjectData; busy: string; resolution: string; setResolution: (value: string) => void; thinking: boolean; setThinking: (value: boolean) => void; generate: () => void; next: () => void }) {
   const conflicts = project.facts?.conflicts || []
   return <section className="flow-panel surface-card">
-    <StepHeader step="步骤 2 / 5" title="核对业务事实">模型只提取素材实际包含的内容，并标记互相冲突的口径。</StepHeader>
+    <StepHeader step="步骤 2 / 6" title="核对业务事实">模型只提取素材实际包含的内容，并标记互相冲突的口径。</StepHeader>
     {project.material.exists && <ThinkingToggle checked={thinking} onChange={setThinking} recommended disabled={!!busy} />}
     {!project.material.exists ? <Gate icon={<FileText size={25} />} message="缺少原始素材" target="请先前往素材管理导入业务原始素材。" /> : !project.facts ? <ActionState icon={<BookOpenText size={27} />} title="从原始素材提取事实" description="系统会自动归类、去重，并区分可确认事实、宣传表达和口径冲突。" button={<button className="primary" onClick={generate} disabled={!!busy}>{busy === 'facts' ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}开始提取</button>} /> : conflicts.length ? <div className="conflict-area"><div className="alert-heading"><Scale size={20} /><div><b>发现 {conflicts.length} 处口径冲突</b><p>确认统一口径后，系统会重新生成完整事实。</p></div></div>{conflicts.map((item, index) => <div className="conflict-row" key={`${item.topic}-${index}`}><span>{item.topic}</span><b>{item.question}</b><ul>{item.versions.map((version) => <li key={version}>{version}</li>)}</ul></div>)}<label className="field"><span>统一口径</span><textarea rows={4} value={resolution} onChange={(e) => setResolution(e.target.value)} placeholder="逐条说明应采用的标准口径" /></label><button className="primary" onClick={generate} disabled={!resolution.trim() || !!busy}>{busy === 'facts' ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}按确认口径重新提取</button></div> : <><div className="facts-heading"><span><CheckCircle2 size={18} />已形成完整业务事实</span><button className="text-button" onClick={generate} disabled={!!busy}><RefreshCw size={15} />重新提取</button></div><div className="facts-table">{project.facts.confirmedFacts.map((group, index) => <div key={`${group.category}-${index}`}><b>{group.category}</b><ul>{group.items.map((item) => <li key={item}>{item}</li>)}</ul></div>)}</div><div className="panel-actions right"><button className="primary" onClick={next}>继续生成策略<ChevronRight size={17} /></button></div></>}
   </section>
@@ -355,7 +402,7 @@ function FactsStep({ project, busy, resolution, setResolution, thinking, setThin
 
 function StrategyStep({ project, busy, thinking, setThinking, generate, choice, setChoice, strategyAdvice, setStrategyAdvice, save }: { project: ProjectData; busy: string; thinking: boolean; setThinking: (value: boolean) => void; generate: () => void; choice: string[]; setChoice: (ids: string[]) => void; strategyAdvice: Record<string, string>; setStrategyAdvice: (value: Record<string, string>) => void; save: () => void }) {
   return <section className="flow-panel surface-card">
-    <StepHeader step="步骤 3 / 5" title="选择内容策略" action={project.strategies.length > 0 && <button className="secondary compact" onClick={generate} disabled={!!busy}><RefreshCw size={15} />换一批策略</button>}>可以同时选择多个方向；后续会为每个策略各生成一篇独立文案。</StepHeader>
+    <StepHeader step="步骤 3 / 6" title="选择内容策略" action={project.strategies.length > 0 && <button className="secondary compact" onClick={generate} disabled={!!busy}><RefreshCw size={15} />换一批策略</button>}>可以同时选择多个方向；后续会为每个策略各生成一篇独立文案。</StepHeader>
     {project.facts && !project.facts.conflicts.length && <ThinkingToggle checked={thinking} onChange={setThinking} disabled={!!busy} />}
     {!project.facts || project.facts.conflicts.length ? <Gate icon={<Circle size={25} />} message="业务事实尚未确认" target="请先完成上一步，再生成策略。" /> : project.strategies.length === 0 ? <ActionState icon={<Sparkles size={27} />} title="生成本轮策略候选" description={`将读取 ${project.keywords.filter((item) => item.enabled).length} 条生效关键词、${project.references.filter((item) => item.enabled).length} 篇生效参考文案和 ${project.rules.filter((item) => item.enabled).length} 条生效合规准则。`} button={<button className="primary" onClick={generate} disabled={!!busy}>{busy === 'strategies' ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}生成策略</button>} /> : <><div className="selection-summary">已选 {choice.length} 个策略，将生成 {choice.length} 篇文案；每个策略可单独填写要求。</div><div className="strategy-list">{project.strategies.map((strategy) => <StrategyCard key={strategy.id} strategy={strategy} project={project} selected={choice.includes(strategy.id)} onSelect={() => setChoice(choice.includes(strategy.id) ? choice.filter((id) => id !== strategy.id) : [...choice, strategy.id])} advice={strategyAdvice[strategy.id] || ''} onAdviceChange={(value) => setStrategyAdvice({ ...strategyAdvice, [strategy.id]: value })} />)}</div><div className="panel-actions right"><button className="primary" onClick={save} disabled={!choice.length || !!busy}>{busy === 'select' ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}确认 {choice.length} 个策略并继续</button></div></>}
   </section>
@@ -368,7 +415,7 @@ function StrategyCard({ strategy, project, selected, onSelect, advice, onAdviceC
 
 function ComposeStep({ project, strategies, busy, thinking, setThinking, generate, back }: { project: ProjectData; strategies: Strategy[]; busy: string; thinking: boolean; setThinking: (value: boolean) => void; generate: () => void; back: () => void }) {
   return <section className="flow-panel surface-card">
-    <StepHeader step="步骤 4 / 5" title="生成完整文案">模型会按已选策略逐篇流式生成标题、正文和话题标签。</StepHeader>
+    <StepHeader step="步骤 4 / 6" title="生成完整文案">模型会按已选策略逐篇流式生成标题、正文和话题标签。</StepHeader>
     {!strategies.length ? <Gate icon={<LayoutTemplate size={25} />} message="尚未选定策略" target="请返回上一步选择并确认策略。" /> : <><ThinkingToggle checked={thinking} onChange={setThinking} disabled={!!busy} /><div className="compose-strategy-list">{strategies.map((strategy, index) => <div className="compose-strategy" key={strategy.id}><span>文案 {String.fromCharCode(65 + index)} · {strategy.id}</span><h3>{strategy.name}</h3><p>{strategy.angle}</p>{project.strategyAdvice[strategy.id] && <small>{project.strategyAdvice[strategy.id]}</small>}</div>)}</div><div className="generation-inputs"><div><span>将生成</span><b>{strategies.length} 篇</b></div><div><span>生效关键词</span><b>{project.keywords.filter((item) => item.enabled).length} 条</b></div><div><span>生效合规准则</span><b>{project.rules.filter((item) => item.enabled).length} 条</b></div><div><span>指定参考</span><b>{new Set(strategies.flatMap((strategy) => strategy.referenceIds)).size} 篇</b></div></div><div className="panel-actions"><button className="secondary" onClick={back}>返回调整策略</button><button className="primary" onClick={generate} disabled={!!busy}>{busy === 'draft' ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}生成 {strategies.length} 篇文案</button></div></>}
   </section>
 }
@@ -379,13 +426,13 @@ function revisionLabel(drafts: Draft[], draft: Draft) {
   return index <= 0 ? '初稿' : `修订 ${index}`
 }
 
-function ReviewStep({ project, draft, viewVersion, setViewVersion, revision, setRevision, busy, thinking, setThinking, revise, saveManual, confirm, newGeneration }: { project: ProjectData; draft: Draft | null; viewVersion: number | null; setViewVersion: (version: number) => void; revision: string; setRevision: (value: string) => void; busy: string; thinking: boolean; setThinking: (value: boolean) => void; revise: () => void; saveManual: (draft: { version: number; title: string; body: string; hashtags: string }) => Promise<boolean>; confirm: (version: number) => void; newGeneration: () => void }) {
+function ReviewStep({ project, draft, viewVersion, setViewVersion, revision, setRevision, busy, thinking, setThinking, revise, saveManual, confirm, goImages }: { project: ProjectData; draft: Draft | null; viewVersion: number | null; setViewVersion: (version: number) => void; revision: string; setRevision: (value: string) => void; busy: string; thinking: boolean; setThinking: (value: boolean) => void; revise: () => void; saveManual: (draft: { version: number; title: string; body: string; hashtags: string }) => Promise<boolean>; confirm: (version: number) => void; goImages: () => void }) {
   const [manual, setManual] = useState(() => ({
     title: draft?.title || '',
     body: draft?.body || '',
     hashtags: draft?.hashtags.map((tag) => `#${tag}`).join(' ') || '',
   }))
-  if (!draft) return <section className="flow-panel surface-card"><StepHeader step="步骤 5 / 5" title="审核并确认文案">确认前，文案不会成为最终输出。</StepHeader><Gate icon={<FileText size={25} />} message="还没有生成文案" target="请先完成策略选择并生成文案。" /></section>
+  if (!draft) return <section className="flow-panel surface-card"><StepHeader step="步骤 5 / 6" title="审核并确认文案">确认前，文案不会成为最终输出。</StepHeader><Gate icon={<FileText size={25} />} message="还没有生成文案" target="请先完成策略选择并生成文案。" /></section>
   const strategy = project.strategies.find((item) => item.id === draft.strategyId)
   const strategyIds = [...new Set([...project.selectedStrategyIds, ...project.drafts.map((item) => item.strategyId)])]
   const documentIndex = strategyIds.indexOf(draft.strategyId)
@@ -393,8 +440,93 @@ function ReviewStep({ project, draft, viewVersion, setViewVersion, revision, set
   const dirty = manual.title !== draft.title || manual.body !== draft.body || manual.hashtags !== draft.hashtags.map((tag) => `#${tag}`).join(' ')
   const allConfirmed = project.selectedStrategyIds.every((id) => project.drafts.some((item) => item.strategyId === id && item.confirmed))
   return <section className="flow-panel review-panel surface-card">
-    <StepHeader step="步骤 5 / 5" title="审核并确认文案">文案按策略分组，每篇文案内部单独保留初稿和修订记录。直接在画布中修改即可。</StepHeader>
-    <div className="review-grid"><article className="draft-preview editable-canvas"><div className="draft-meta"><span>{documentLabel(documentIndex)}</span><span>{strategy?.name || draft.strategyId}</span><span>{revisionLabel(revisions, draft)}</span><span>{formatTime(draft.createdAt)}</span>{draft.confirmed && <b><CheckCircle2 size={14} />已确认</b>}</div><input className="canvas-title" aria-label="文案标题" value={manual.title} onChange={(event) => setManual({ ...manual, title: event.target.value })} /><textarea className="canvas-body" aria-label="文案正文" rows={Math.max(18, manual.body.split('\n').length + 4)} value={manual.body} onChange={(event) => setManual({ ...manual, body: event.target.value })} /><div className="canvas-tags"><span>话题</span><input aria-label="话题标签" value={manual.hashtags} onChange={(event) => setManual({ ...manual, hashtags: event.target.value })} placeholder="#亲子研学 #周末去处" /></div>{dirty && <div className="canvas-savebar"><span>画布中有未保存的修改</span><button className="primary compact" disabled={!manual.title.trim() || !manual.body.trim() || !!busy} onClick={() => saveManual({ version: draft.version, ...manual })}>{busy === 'manual' ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存为{revisions.length ? `修订 ${revisions.length}` : '初稿'}</button></div>}</article><aside className="review-tools"><div className="document-nav"><h3>本轮文案</h3><div className="document-list">{strategyIds.map((strategyId, index) => { const items = project.drafts.filter((item) => item.strategyId === strategyId); const latest = items.at(-1); const itemStrategy = project.strategies.find((item) => item.id === strategyId); if (!latest) return null; return <button key={strategyId} className={strategyId === draft.strategyId ? 'active' : ''} onClick={() => setViewVersion(latest.version)}><span>{documentLabel(index)}</span><b>{itemStrategy?.name || strategyId}</b>{items.some((item) => item.confirmed) ? <CheckCircle2 size={14} /> : <small>{items.length > 1 ? `${items.length - 1} 次修订` : '待审核'}</small>}</button> })}</div><h3>修订记录</h3><div className="revision-tabs">{revisions.map((item) => <button key={item.version} className={viewVersion === item.version ? 'active' : ''} onClick={() => setViewVersion(item.version)}>{revisionLabel(revisions, item)}{item.confirmed && <Check size={12} />}</button>)}</div></div><div className="revision-form"><label className="field"><span>AI 修改这篇文案</span><textarea rows={4} value={revision} onChange={(e) => setRevision(e.target.value)} placeholder="例如：标题更直接；删减第二段；语气再克制一点" /></label><ThinkingToggle checked={thinking} onChange={setThinking} disabled={!!busy} /><button className="secondary full" onClick={revise} disabled={!revision.trim() || !!busy || dirty}>{busy === 'revise' ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}生成一次修订</button>{dirty && <p className="inline-hint">请先保存画布中的修改，再使用 AI 修订。</p>}{!draft.confirmed && <button className="primary full" onClick={() => confirm(draft.version)} disabled={!!busy || dirty}><Check size={17} />确认这一稿</button>}</div>{draft.confirmed && <div className="confirmed-state"><CheckCircle2 size={23} /><b>这篇文案已确认</b><p>已保存到项目文件夹。</p></div>}{allConfirmed && <button className="primary full review-new" onClick={newGeneration}><Plus size={17} />开始新一轮生成</button>}</aside></div>
+    <StepHeader step="步骤 5 / 6" title="审核并确认文案">文案按策略分组，每篇文案内部单独保留初稿和修订记录。直接在画布中修改即可。</StepHeader>
+    <div className="review-grid"><article className="draft-preview editable-canvas"><div className="draft-meta"><span>{documentLabel(documentIndex)}</span><span>{strategy?.name || draft.strategyId}</span><span>{revisionLabel(revisions, draft)}</span><span>{formatTime(draft.createdAt)}</span>{draft.confirmed && <b><CheckCircle2 size={14} />已确认</b>}</div><input className="canvas-title" aria-label="文案标题" value={manual.title} onChange={(event) => setManual({ ...manual, title: event.target.value })} /><textarea className="canvas-body" aria-label="文案正文" rows={Math.max(18, manual.body.split('\n').length + 4)} value={manual.body} onChange={(event) => setManual({ ...manual, body: event.target.value })} /><div className="canvas-tags"><span>话题</span><input aria-label="话题标签" value={manual.hashtags} onChange={(event) => setManual({ ...manual, hashtags: event.target.value })} placeholder="#亲子研学 #周末去处" /></div>{dirty && <div className="canvas-savebar"><span>画布中有未保存的修改</span><button className="primary compact" disabled={!manual.title.trim() || !manual.body.trim() || !!busy} onClick={() => saveManual({ version: draft.version, ...manual })}>{busy === 'manual' ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存为{revisions.length ? `修订 ${revisions.length}` : '初稿'}</button></div>}</article><aside className="review-tools"><div className="document-nav"><h3>本轮文案</h3><div className="document-list">{strategyIds.map((strategyId, index) => { const items = project.drafts.filter((item) => item.strategyId === strategyId); const latest = items.at(-1); const itemStrategy = project.strategies.find((item) => item.id === strategyId); if (!latest) return null; return <button key={strategyId} className={strategyId === draft.strategyId ? 'active' : ''} onClick={() => setViewVersion(latest.version)}><span>{documentLabel(index)}</span><b>{itemStrategy?.name || strategyId}</b>{items.some((item) => item.confirmed) ? <CheckCircle2 size={14} /> : <small>{items.length > 1 ? `${items.length - 1} 次修订` : '待审核'}</small>}</button> })}</div><h3>修订记录</h3><div className="revision-tabs">{revisions.map((item) => <button key={item.version} className={viewVersion === item.version ? 'active' : ''} onClick={() => setViewVersion(item.version)}>{revisionLabel(revisions, item)}{item.confirmed && <Check size={12} />}</button>)}</div></div><div className="revision-form"><label className="field"><span>AI 修改这篇文案</span><textarea rows={4} value={revision} onChange={(e) => setRevision(e.target.value)} placeholder="例如：标题更直接；删减第二段；语气再克制一点" /></label><ThinkingToggle checked={thinking} onChange={setThinking} disabled={!!busy} /><button className="secondary full" onClick={revise} disabled={!revision.trim() || !!busy || dirty}>{busy === 'revise' ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}生成一次修订</button>{dirty && <p className="inline-hint">请先保存画布中的修改，再使用 AI 修订。</p>}{!draft.confirmed && <button className="primary full" onClick={() => confirm(draft.version)} disabled={!!busy || dirty}><Check size={17} />确认这一稿</button>}</div>{draft.confirmed && <div className="confirmed-state"><CheckCircle2 size={23} /><b>这篇文案已确认</b><p>已保存到项目文件夹。</p></div>}{allConfirmed && <button className="primary full review-new" onClick={goImages}><ImagePlus size={17} />继续制作配图</button>}</aside></div>
+  </section>
+}
+
+const imageStyleOptions: Array<{ value: ImageBrief['style']; label: string; hint: string }> = [
+  { value: 'lifestyle', label: '真实种草', hint: '自然光与生活感' },
+  { value: 'event', label: '活动招募', hint: '明确行动氛围' },
+  { value: 'product', label: '产品展示', hint: '主体与材质优先' },
+  { value: 'guide', label: '攻略清单', hint: '卡片化信息层级' },
+  { value: 'editorial', label: '杂志质感', hint: '大图和克制留白' },
+]
+
+function listText(values: string[]) { return values.join('、') }
+function parseList(value: string) { return [...new Set(value.split(/[、,，\n]+/).map((item) => item.trim()).filter(Boolean))] }
+
+function ImageStep({ project, busy, prepareBrief, generateImages, selectImage, exportImage, newGeneration }: {
+  project: ProjectData; busy: string; prepareBrief: (version: number) => Promise<boolean>;
+  generateImages: (version: number, brief: ImageBrief) => Promise<boolean>;
+  selectImage: (taskId: string, imageId: string) => Promise<boolean>;
+  exportImage: (taskId: string, imageId: string) => void; newGeneration: () => void;
+}) {
+  const confirmedDrafts = project.selectedStrategyIds.map((strategyId) => project.drafts.find((item) => item.strategyId === strategyId && item.confirmed)).filter(Boolean) as Draft[]
+  const [selectedVersion, setSelectedVersion] = useState(confirmedDrafts[0]?.version || 0)
+  const draft = confirmedDrafts.find((item) => item.version === selectedVersion) || confirmedDrafts[0]
+  const task = project.imageTasks.find((item) => item.draftVersion === draft?.version && item.strategyId === draft?.strategyId)
+  const [brief, setBrief] = useState<ImageBrief | null>(task?.brief || null)
+  const [palette, setPalette] = useState(task ? listText(task.brief.palette) : '')
+  const [mustShow, setMustShow] = useState(task ? listText(task.brief.mustShow) : '')
+  const [mustAvoid, setMustAvoid] = useState(task ? listText(task.brief.mustAvoid) : '')
+  const [imageUrls, setImageUrls] = useState<Record<string, string>>({})
+  const briefSignature = JSON.stringify(task?.brief || null)
+
+  useEffect(() => {
+    if (!draft && confirmedDrafts[0]) setSelectedVersion(confirmedDrafts[0].version)
+  }, [draft, confirmedDrafts])
+
+  useEffect(() => {
+    setBrief(task?.brief || null)
+    setPalette(task ? listText(task.brief.palette) : '')
+    setMustShow(task ? listText(task.brief.mustShow) : '')
+    setMustAvoid(task ? listText(task.brief.mustAvoid) : '')
+  }, [task?.id, briefSignature, selectedVersion])
+
+  useEffect(() => {
+    let active = true
+    const images = task?.images || []
+    Promise.all(images.map(async (image) => {
+      const result = await window.workshop.readGeneratedImage(image.relativePath)
+      return [image.id, result.ok ? result.imageUrl || '' : ''] as const
+    })).then((entries) => { if (active) setImageUrls(Object.fromEntries(entries)) })
+    return () => { active = false }
+  }, [task?.id, task?.updatedAt])
+
+  if (!confirmedDrafts.length) return <section className="flow-panel surface-card"><StepHeader step="步骤 6 / 6" title="制作小红书配图">配图只会使用已经确认的文案和业务事实。</StepHeader><Gate icon={<ImageIcon size={25} />} message="还没有已确认的文案" target="请先回到上一步确认至少一篇文案。" /></section>
+  if (!draft) return null
+  const strategy = project.strategies.find((item) => item.id === draft.strategyId)
+  const allIllustrated = confirmedDrafts.every((item) => project.imageTasks.some((imageTask) => imageTask.draftVersion === item.version && imageTask.selectedImageId))
+  const editableBrief = brief ? { ...brief, palette: parseList(palette), mustShow: parseList(mustShow), mustAvoid: parseList(mustAvoid) } : null
+  const newestImages = [...(task?.images || [])].reverse()
+
+  return <section className="flow-panel image-workspace surface-card">
+    <StepHeader step="步骤 6 / 6" title="制作小红书配图" action={task && <button className="secondary compact" onClick={() => prepareBrief(draft.version)} disabled={!!busy}>{busy === 'image-brief' ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}重新策划</button>}>先由文案模型整理画面策划，再调用图片模型生成 3:4 宣传封面；图片会立即保存到项目目录。</StepHeader>
+    <div className="image-document-tabs">{confirmedDrafts.map((item, index) => { const itemTask = project.imageTasks.find((candidate) => candidate.draftVersion === item.version); return <button key={item.version} className={item.version === draft.version ? 'active' : ''} onClick={() => setSelectedVersion(item.version)}><span>{documentLabel(index)}</span><b>{item.title}</b>{itemTask?.selectedImageId ? <CheckCircle2 size={15} /> : <small>{itemTask?.images.length ? `${itemTask.images.length} 张候选` : '待配图'}</small>}</button> })}</div>
+    {!task || !brief ? <ActionState icon={<ImagePlus size={27} />} title={`为「${draft.title}」生成图片策划`} description="系统会从已确认文案、业务事实和合规规则中提炼封面短标题、画面主体、场景、构图和禁止事项。" button={<button className="primary" onClick={() => prepareBrief(draft.version)} disabled={!!busy}>{busy === 'image-brief' ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}生成图片策划</button>} /> : <div className="image-studio-grid">
+      <div className="image-brief-panel">
+        <div className="image-brief-heading"><div><span>{strategy?.name || draft.strategyId}</span><h3>封面策划</h3></div><span className="ratio-chip">3:4</span></div>
+        <div className="image-copy-grid"><label className="field"><span>封面大标题</span><input value={brief.coverTitle} maxLength={30} onChange={(event) => setBrief({ ...brief, coverTitle: event.target.value })} /></label><label className="field"><span>短副标题 <small>可选</small></span><input value={brief.subtitle} maxLength={40} onChange={(event) => setBrief({ ...brief, subtitle: event.target.value })} /></label></div>
+        <fieldset className="style-picker"><legend>视觉风格</legend>{imageStyleOptions.map((option) => <label key={option.value} className={brief.style === option.value ? 'active' : ''}><input type="radio" name="image-style" value={option.value} checked={brief.style === option.value} onChange={() => setBrief({ ...brief, style: option.value })} /><span><b>{option.label}</b><small>{option.hint}</small></span></label>)}</fieldset>
+        <label className="field"><span>画面主体</span><textarea rows={3} value={brief.subject} onChange={(event) => setBrief({ ...brief, subject: event.target.value })} /></label>
+        <label className="field"><span>场景、动作和光线</span><textarea rows={4} value={brief.scene} onChange={(event) => setBrief({ ...brief, scene: event.target.value })} /></label>
+        <label className="field"><span>构图与标题留白</span><textarea rows={3} value={brief.composition} onChange={(event) => setBrief({ ...brief, composition: event.target.value })} /></label>
+        <div className="image-copy-grid"><label className="field"><span>主辅色 <small>用顿号分隔</small></span><input value={palette} onChange={(event) => setPalette(event.target.value)} placeholder="奶油白、草木绿、暖黄色" /></label><label className="field"><span>整体氛围</span><input value={brief.mood} onChange={(event) => setBrief({ ...brief, mood: event.target.value })} /></label></div>
+        <label className="field"><span>必须呈现 <small>用顿号分隔</small></span><input value={mustShow} onChange={(event) => setMustShow(event.target.value)} /></label>
+        <label className="field"><span>不得出现 <small>用顿号分隔</small></span><input value={mustAvoid} onChange={(event) => setMustAvoid(event.target.value)} /></label>
+        <label className="field"><span>补充要求 <small>可选</small></span><textarea rows={3} value={brief.extraNotes} onChange={(event) => setBrief({ ...brief, extraNotes: event.target.value })} placeholder="例如：不要遮挡产品包装；整体更像真实用户分享" /></label>
+        {task.prompt && <details className="prompt-preview"><summary>查看上次发送的完整提示词</summary><pre>{task.prompt}</pre>{task.negativePrompt && <><b>负面提示词</b><p>{task.negativePrompt}</p></>}</details>}
+        <button className="primary full image-generate-button" onClick={() => editableBrief && generateImages(draft.version, editableBrief)} disabled={!editableBrief?.coverTitle.trim() || !!busy}>{busy === 'image-generate' ? <LoaderCircle className="spin" size={17} /> : <ImagePlus size={17} />}{newestImages.length ? '再生成一组候选图' : '生成候选图'}</button>
+        <p className="generation-cost-note">每次调用会按设置中的候选数量产生图片生成费用。</p>
+      </div>
+      <div className="contact-sheet">
+        <div className="contact-sheet-heading"><div><h3>候选底片</h3><p>{newestImages.length ? `已保存 ${newestImages.length} 张，点击图片选为封面` : '生成后会在这里进行选片'}</p></div>{task.selectedImageId && <span><Check size={14} />已选封面</span>}</div>
+        {busy === 'image-generate' && <div className="image-generating"><LoaderCircle className="spin" size={28} /><b>图片模型正在制作封面</b><span>复杂中文排版可能需要几分钟，请保持应用打开。</span></div>}
+        {!newestImages.length && busy !== 'image-generate' ? <div className="empty-contact-sheet"><ImageIcon size={31} /><b>还没有候选图</b><span>确认左侧策划内容后开始生成。</span></div> : <div className="candidate-grid">{newestImages.map((image, index) => <article key={image.id} className={task.selectedImageId === image.id ? 'selected' : ''}><button className="candidate-image" onClick={() => selectImage(task.id, image.id)} disabled={!!busy} aria-label={`选择候选图 ${newestImages.length - index}`}><span className="film-index">{String(newestImages.length - index).padStart(2, '0')}</span>{imageUrls[image.id] ? <img src={imageUrls[image.id]} alt={`候选封面 ${newestImages.length - index}`} /> : <span className="image-loading"><LoaderCircle className="spin" size={20} /></span>}{task.selectedImageId === image.id && <span className="selected-stamp"><Check size={15} />封面</span>}</button><footer><span>{image.size} · {image.model}</span><button className="text-button" onClick={() => exportImage(task.id, image.id)}><Download size={14} />导出</button></footer></article>)}</div>}
+      </div>
+    </div>}
+    {allIllustrated && <div className="image-finish-bar"><div><CheckCircle2 size={21} /><span><b>本轮配图已完成</b><small>每篇已确认文案都已选择封面。</small></span></div><button className="primary" onClick={newGeneration} disabled={!!busy}><Plus size={17} />开始新一轮生成</button></div>}
   </section>
 }
 
@@ -421,7 +553,8 @@ function ArchivedGeneration({ record, step }: { record: GenerationRecord; step: 
   if (step === 2) return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 2`} title="当时的业务事实">归档记录中的事实提取结果。</StepHeader>{record.facts ? <div className="facts-table">{record.facts.confirmedFacts.map((group, index) => <div key={`${group.category}-${index}`}><b>{group.category}</b><ul>{group.items.map((item) => <li key={item}>{item}</li>)}</ul></div>)}</div> : <Gate icon={<Archive size={25} />} message="无事实快照" target="这是升级前创建的历史记录。" />}</section>
   if (step === 3) return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 3`} title="当时的策略选择">蓝色高亮项是本轮实际选用的策略。</StepHeader><div className="strategy-list">{record.strategies.map((strategy) => <div key={strategy.id}><StrategyCard strategy={strategy} project={{ references: record.references || [] } as ProjectData} selected={selectedIds.includes(strategy.id)} onSelect={() => undefined} />{selectedIds.includes(strategy.id) && (record.strategyAdvice?.[strategy.id] || (record.selectedStrategyId === strategy.id && record.advice)) && <div className="archived-advice"><PenLine size={13} /><span>{record.strategyAdvice?.[strategy.id] || record.advice}</span></div>}</div>)}</div></section>
   if (step === 4) return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 4`} title="当时的生成任务">本轮按以下 {selectedStrategies.length} 个策略生成文案。</StepHeader><div className="compose-strategy-list">{selectedStrategies.map((strategy, index) => <div className="compose-strategy" key={strategy.id}><span>{documentLabel(index)} · {strategy.id}</span><h3>{strategy.name}</h3><p>{strategy.angle}</p>{(record.strategyAdvice?.[strategy.id] || (record.selectedStrategyId === strategy.id && record.advice)) && <small>{record.strategyAdvice?.[strategy.id] || record.advice}</small>}</div>)}</div></section>
-  return <ArchivedReview record={record} />
+  if (step === 5) return <ArchivedReview record={record} />
+  return <ArchivedImages record={record} />
 }
 
 function ArchivedReview({ record }: { record: GenerationRecord }) {
@@ -434,6 +567,22 @@ function ArchivedReview({ record }: { record: GenerationRecord }) {
   const documentIndex = strategyIds.indexOf(draft.strategyId)
   const revisions = record.drafts.filter((item) => item.strategyId === draft.strategyId)
   return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 5`} title="当时的审核结果">文案与各自的修订记录按归档时的状态回放。</StepHeader><div className="review-grid"><article className="draft-preview"><div className="draft-meta"><span>{documentLabel(documentIndex)}</span><span>{record.strategies.find((item) => item.id === draft.strategyId)?.name || draft.strategyId}</span><span>{revisionLabel(revisions, draft)}</span><span>{formatTime(draft.createdAt)}</span>{draft.confirmed && <b><CheckCircle2 size={14} />已确认</b>}</div><h3>{draft.title}</h3><div>{draft.body.split('\n').map((line, index) => <p key={index}>{line || '\u00a0'}</p>)}</div><footer>{draft.hashtags.map((tag) => <span key={tag}>#{tag}</span>)}</footer></article><aside className="review-tools"><div className="document-nav"><h3>当时的文案</h3><div className="document-list">{strategyIds.map((strategyId, index) => { const items = record.drafts.filter((item) => item.strategyId === strategyId); const latest = [...items].reverse().find((item) => item.confirmed) || items.at(-1); if (!latest) return null; return <button key={strategyId} className={strategyId === draft.strategyId ? 'active' : ''} onClick={() => setVersion(latest.version)}><span>{documentLabel(index)}</span><b>{record.strategies.find((item) => item.id === strategyId)?.name || strategyId}</b>{items.some((item) => item.confirmed) && <CheckCircle2 size={14} />}</button> })}</div><h3>修订记录</h3><div className="revision-tabs">{revisions.map((item) => <button key={item.version} className={item.version === draft.version ? 'active' : ''} onClick={() => setVersion(item.version)}>{revisionLabel(revisions, item)}{item.confirmed && <Check size={12} />}</button>)}</div></div></aside></div></section>
+}
+
+function ArchivedImages({ record }: { record: GenerationRecord }) {
+  const tasks = record.imageTasks || []
+  const [sources, setSources] = useState<Record<string, string>>({})
+  useEffect(() => {
+    let active = true
+    const images = tasks.flatMap((task) => task.images)
+    Promise.all(images.map(async (item) => {
+      const result = await window.workshop.readGeneratedImage(item.relativePath)
+      return [item.id, result.ok ? result.imageUrl || '' : ''] as const
+    })).then((entries) => { if (active) setSources(Object.fromEntries(entries)) })
+    return () => { active = false }
+  }, [record.id])
+  if (!tasks.length) return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 6`} title="当时的宣传配图">该记录没有生成宣传图片。</StepHeader><Gate icon={<Archive size={25} />} message="无配图记录" target="这轮生成可能在制作配图功能上线前完成。" /></section>
+  return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 6`} title="当时的宣传配图">以下图片和策划内容按归档时的状态回放。</StepHeader><div className="archived-image-groups">{tasks.map((task) => { const draft = record.drafts.find((item) => item.version === task.draftVersion); const selected = task.images.find((item) => item.id === task.selectedImageId); return <article key={task.id}><div><span>{task.strategyId} · 文案 v{task.draftVersion}</span><h3>{draft?.title || task.brief.coverTitle}</h3><p>{task.brief.subject}</p></div>{selected && sources[selected.id] ? <img src={sources[selected.id]} alt={task.brief.coverTitle} /> : <div className="archived-image-empty"><ImageIcon size={24} /><span>未选择封面</span></div>}</article> })}</div></section>
 }
 
 function partialJsonString(source: string, key: string) {
@@ -573,13 +722,22 @@ function ReferenceCells({ item }: { item: Reference }) {
 
 function SettingsPage({ settings, setSettings, save, busy }: { settings: ModelSettings; setSettings: (settings: ModelSettings) => void; save: () => void; busy: string }) {
   const [showApiKey, setShowApiKey] = useState(false)
+  const [showImageApiKey, setShowImageApiKey] = useState(false)
 
   async function pasteApiKey() {
     const apiKey = (await window.workshop.readClipboardText()).trim()
     if (apiKey) setSettings({ ...settings, apiKey })
   }
+  async function pasteImageApiKey() {
+    const apiKey = (await window.workshop.readClipboardText()).trim()
+    if (apiKey) setSettings({ ...settings, image: { ...settings.image, apiKey } })
+  }
+  function setImage(value: Partial<ImageModelSettings>) { setSettings({ ...settings, image: { ...settings.image, ...value } }) }
+  const imageEndpoint = resolvedImageEndpoint(settings.image)
+  const incompatibleOpenAiDomain = settings.image.protocol === 'openai' && usesPublicDashScopeDomain(settings.image.baseUrl)
 
-  return <div className="page-content settings-page"><PageHeader title="设置">配置用于提取事实、生成策略与撰写文案的模型服务。设置保存在本机，不会写入项目目录。</PageHeader><section className="settings-card surface-card"><div className="settings-heading"><span className="large-icon"><KeyRound size={22} /></span><div><h2>模型连接</h2><p>支持 OpenAI Chat Completions 兼容接口。</p></div><span className={`connection-badge ${settings.apiKey && settings.model ? 'ready' : ''}`}>{settings.apiKey && settings.model ? '已配置' : '待配置'}</span></div><div className="settings-form"><label className="field"><span>接口地址</span><input value={settings.baseUrl} onChange={(e) => setSettings({ ...settings, baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" /></label><div className="field"><label htmlFor="api-key">API Key</label><div className="secret-input"><input id="api-key" type={showApiKey ? 'text' : 'password'} value={settings.apiKey} onChange={(e) => setSettings({ ...settings, apiKey: e.target.value })} placeholder="sk-…" autoComplete="off" /><div className="secret-actions"><button type="button" onClick={() => setShowApiKey((visible) => !visible)} title={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'}>{showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}</button><button type="button" onClick={pasteApiKey} title="从剪贴板粘贴 API Key"><ClipboardPaste size={15} /><span>粘贴</span></button></div></div></div><label className="field"><span>模型名称</span><input value={settings.model} onChange={(e) => setSettings({ ...settings, model: e.target.value })} placeholder="例如 gpt-5-mini" /></label></div><div className="security-note"><KeyRound size={16} /><span>密钥仅保存在本机应用数据中，请勿在共享设备上使用个人密钥。</span></div><div className="panel-actions right"><button className="primary" onClick={save} disabled={!!busy}>{busy === 'settings' ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}保存设置</button></div></section></div>
+  return <div className="page-content settings-page"><PageHeader title="设置">分别配置文案模型和图片模型。连接信息保存在本机应用数据中，不会写入项目目录。</PageHeader><div className="settings-stack"><section className="settings-card surface-card"><div className="settings-heading"><span className="large-icon"><KeyRound size={22} /></span><div><h2>文案模型</h2><p>用于提取事实、生成策略、撰写文案和整理图片策划。</p></div><span className={`connection-badge ${settings.apiKey && settings.model ? 'ready' : ''}`}>{settings.apiKey && settings.model ? '已配置' : '待配置'}</span></div><div className="settings-form"><label className="field"><span>接口地址</span><input value={settings.baseUrl} onChange={(e) => setSettings({ ...settings, baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" /></label><div className="field"><label htmlFor="api-key">API Key</label><div className="secret-input"><input id="api-key" type={showApiKey ? 'text' : 'password'} value={settings.apiKey} onChange={(e) => setSettings({ ...settings, apiKey: e.target.value })} placeholder="sk-…" autoComplete="off" /><div className="secret-actions"><button type="button" onClick={() => setShowApiKey((visible) => !visible)} title={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'}>{showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}</button><button type="button" onClick={pasteApiKey} title="从剪贴板粘贴 API Key"><ClipboardPaste size={15} /><span>粘贴</span></button></div></div></div><label className="field"><span>模型名称</span><input value={settings.model} onChange={(e) => setSettings({ ...settings, model: e.target.value })} placeholder="例如 qwen-plus" /></label></div></section>
+    <section className={`settings-card image-settings-card surface-card ${settings.image.enabled ? 'enabled' : ''}`}><div className="settings-heading"><span className="large-icon"><ImageIcon size={22} /></span><div><h2>图片模型</h2><p>用于生成小红书 3:4 宣传封面，支持阿里云百炼 Qwen Image。</p></div><label className="settings-enable"><span>{settings.image.enabled ? '已启用' : '未启用'}</span><span className="switch"><input type="checkbox" checked={settings.image.enabled} onChange={(event) => setImage({ enabled: event.target.checked })} /><span /></span></label></div>{settings.image.enabled && <><div className="settings-form"><label className="field"><span>接入协议</span><select value={settings.image.protocol} onChange={(e) => setImage({ protocol: e.target.value as 'dashscope' | 'openai' })}><option value="dashscope">DashScope 同步（官方推荐）</option><option value="openai">OpenAI Images 兼容</option></select><small className="field-hint">协议由这里明确指定，不再根据 URL 自动猜测。已有旧配置会迁移为 DashScope 同步。</small></label><label className="field"><span>接口地址 <small>{settings.image.protocol === 'openai' ? '必须使用 Workspace 专属域名' : '推荐使用 Workspace 专属域名'}</small></span><input value={settings.image.baseUrl} onChange={(e) => setImage({ baseUrl: e.target.value })} placeholder="https://llm-….cn-beijing.maas.aliyuncs.com" /><small className={`field-hint ${incompatibleOpenAiDomain ? 'endpoint-warning' : ''}`}>{incompatibleOpenAiDomain ? '当前公共域名不提供此 OpenAI 图片路由，请改用百炼 Workspace 专属域名，或切回 DashScope 同步。' : '可填写 Workspace 域名、/api/v1 基地址或完整接口；应用会按所选协议规范化最终路径。'}</small>{imageEndpoint && <code className="endpoint-preview">实际请求：{imageEndpoint}</code>}</label><div className="field"><label htmlFor="image-api-key">API Key</label><div className="secret-input"><input id="image-api-key" type={showImageApiKey ? 'text' : 'password'} value={settings.image.apiKey} onChange={(e) => setImage({ apiKey: e.target.value })} placeholder="sk-…" autoComplete="off" /><div className="secret-actions"><button type="button" onClick={() => setShowImageApiKey((visible) => !visible)} title={showImageApiKey ? '隐藏 API Key' : '显示 API Key'} aria-label={showImageApiKey ? '隐藏 API Key' : '显示 API Key'}>{showImageApiKey ? <EyeOff size={16} /> : <Eye size={16} />}</button><button type="button" onClick={pasteImageApiKey} title="从剪贴板粘贴 API Key"><ClipboardPaste size={15} /><span>粘贴</span></button></div></div></div><label className="field"><span>模型名称</span><input value={settings.image.model} onChange={(e) => setImage({ model: e.target.value })} placeholder="qwen-image-3.0-pro" /></label><div className="image-setting-grid"><label className="field"><span>输出尺寸</span><select value={settings.image.size} onChange={(e) => setImage({ size: e.target.value })}><option value="1080x1440">1080 × 1440（推荐）</option><option value="1536x2048">1536 × 2048（高清）</option><option value="1024x1365">1024 × 1365（轻量）</option></select></label><label className="field"><span>每次候选数量</span><select value={settings.image.count} onChange={(e) => setImage({ count: Number(e.target.value) })}>{[1, 2, 3, 4, 5, 6].map((value) => <option key={value} value={value}>{value} 张</option>)}</select></label><label className="field"><span>提示词增强</span><select value={settings.image.promptExtendMode} onChange={(e) => setImage({ promptExtendMode: e.target.value as 'agent' | 'direct' })}><option value="agent">Agent 精细增强</option><option value="direct">Direct 直接增强</option></select></label></div><div className="image-option-list"><label><span><b>启用思考模式</b><small>提高复杂版面质量，但生成时间更长</small></span><span className="switch"><input type="checkbox" checked={settings.image.enableThinking} onChange={(event) => setImage({ enableThinking: event.target.checked })} /><span /></span></label><label><span><b>添加模型水印</b><small>默认关闭，便于直接用于内容发布</small></span><span className="switch"><input type="checkbox" checked={settings.image.watermark} onChange={(event) => setImage({ watermark: event.target.checked })} /><span /></span></label></div></div></>}</section></div><div className="security-note settings-security"><KeyRound size={16} /><span>API Key 仅保存在当前电脑。图片接口、模型和密钥必须属于同一个百炼地域。</span></div><div className="settings-savebar"><button className="primary" onClick={save} disabled={!!busy}>{busy === 'settings' ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}保存全部设置</button></div></div>
 }
 
 function ActionState({ icon, title, description, button }: { icon: React.ReactNode; title: string; description: string; button: React.ReactNode }) {
