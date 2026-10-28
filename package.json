@@ -1,6 +1,6 @@
 {
   "name": "xhs-automation-workshop",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "type": "module",
   "description": "本地优先的小红书运营自动化工坊",
@@ -50,14 +50,19 @@
     "mac": {
       "icon": "build/icon.png",
       "category": "public.app-category.productivity",
-      "target": ["dmg", "zip"]
+      "target": [
+        "dmg",
+        "zip"
+      ]
     },
     "win": {
       "icon": "build/icon.png",
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
