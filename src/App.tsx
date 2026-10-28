@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive, BookOpenText, Brain, Check, CheckCircle2, ChevronDown, ChevronRight,
   Circle, Download, FileText, FolderOpen, KeyRound, LayoutTemplate, LoaderCircle,
@@ -124,6 +124,10 @@ function App() {
     setProject(result.data); setFlowStep(suggestedStep(result.data)); setViewGeneration('current'); setPage('generate')
   }
   async function importMaterial() { await run('material', () => window.workshop.importMaterial(), '原始素材已更新') }
+  async function exportMaterial() {
+    const ok = await run('export-material', () => window.workshop.exportMaterial())
+    if (ok) flash('业务原始素材已导出')
+  }
   function openAsset(kind: AssetKind, item?: Keyword | Rule | Reference) {
     setAssetTab(kind)
     if (kind === 'references' && item) {
@@ -159,6 +163,10 @@ function App() {
       flash(`已导入 ${result.imported || 0} 条记录`)
     } catch (e) { showError(e instanceof Error ? e.message : '批量导入失败') }
     finally { setBusy('') }
+  }
+  async function exportAsset(kind: AssetKind) {
+    const ok = await run(`export-${kind}`, () => window.workshop.exportAsset(kind))
+    if (ok) flash('资料库已导出')
   }
   async function deleteAsset(kind: AssetKind, id: string) {
     if (!window.confirm(`确定删除 ${id}？该编号之后不会再分配给新记录。`)) return
@@ -213,7 +221,7 @@ function App() {
           stream={stream}
           resolution={resolution} setResolution={setResolution}
           thinkingModes={thinkingModes} setThinkingMode={(key, value) => setThinkingModes((current) => ({ ...current, [key]: value }))}
-          generateFacts={async () => { const ok = await run('facts', () => window.workshop.extractFacts(resolution, thinkingModes.facts), resolution ? '业务事实已重新生成' : '业务事实已提取'); if (ok) { setResolution(''); setFlowStep(3) } }}
+          generateFacts={async () => { const ok = await run('facts', () => window.workshop.extractFacts(resolution, thinkingModes.facts), resolution ? '业务事实已重新生成，请核对后继续' : '业务事实已提取，请核对后继续'); if (ok) setResolution('') }}
           generateStrategies={() => run('strategies', () => window.workshop.generateStrategies(thinkingModes.strategies), '策略候选已生成')}
           choice={choice} setChoice={setChoice} strategyAdvice={strategyAdvice} setStrategyAdvice={setStrategyAdvice}
           saveStrategy={async () => { if (!choice.length) return showError('请至少选择一个策略'); const ok = await run('select', () => window.workshop.selectStrategy(choice, strategyAdvice), `已保存 ${choice.length} 个策略`); if (ok) setFlowStep(4) }}
@@ -225,7 +233,7 @@ function App() {
           saveManual={async (value) => { const ok = await run('manual', () => window.workshop.saveManualDraft(value), '手动修改已保存为新版本'); return ok }}
           confirm={(version) => run('confirm', () => window.workshop.confirmDraft(version), '当前文案已确认')}
         />}
-        {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} downloadAssetTemplate={downloadAssetTemplate} importAssetBatch={importAssetBatch} busy={busy} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={(kind, id, enabled) => run('toggle-asset', () => window.workshop.toggleAsset(kind, id, enabled))} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
+        {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} exportMaterial={exportMaterial} downloadAssetTemplate={downloadAssetTemplate} importAssetBatch={importAssetBatch} exportAsset={exportAsset} busy={busy} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={(kind, id, enabled) => run('toggle-asset', () => window.workshop.toggleAsset(kind, id, enabled))} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
         {page === 'settings' && <SettingsPage settings={settings} setSettings={setSettings} save={saveSettings} busy={busy} />}
       </main>
 
@@ -278,7 +286,7 @@ function GenerationPage(props: GenerationPageProps) {
   const displayedId = archived?.id || project?.currentGeneration.id
   const displayedAt = archived?.createdAt || project?.currentGeneration.createdAt
   return <div className="page-content generate-page">
-    <PageHeader title="文案生成" action={project && <button className="secondary" onClick={newGeneration} disabled={busy === 'new-generation'}>{busy === 'new-generation' ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />}新建生成</button>}>
+    <PageHeader title="文案生成" action={project && <div className="generation-header-actions"><button className="secondary" onClick={newGeneration} disabled={busy === 'new-generation'}>{busy === 'new-generation' ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />}新建生成</button><GenerationHistory project={project} selected={viewGeneration} onSelect={setViewGeneration} /></div>}>
       按流程完成一篇或多篇文案。同一个项目可以创建多轮生成，素材与历史记录互不丢失。
     </PageHeader>
     {!project ? <ProjectEmpty recent={recent} openRecent={openRecent} chooseFolder={chooseFolder} /> : <>
@@ -294,12 +302,9 @@ function GenerationPage(props: GenerationPageProps) {
           })}
         </div>
       </section>
-      <div className="generation-layout">
-        <div className="generation-main">
-          {modelBusy && <GenerationActivity stream={props.stream} busy={busy} project={project} thinkingEnabled={props.thinkingModes[busy as 'facts' | 'strategies' | 'draft' | 'revise']} />}
-          {archived ? <ArchivedGeneration record={archived} step={flowStep} /> : <CurrentFlow {...props} />}
-        </div>
-        <GenerationHistory project={project} selected={viewGeneration} onSelect={setViewGeneration} />
+      <div className="generation-main">
+        {modelBusy && <GenerationActivity stream={props.stream} busy={busy} project={project} thinkingEnabled={props.thinkingModes[busy as 'facts' | 'strategies' | 'draft' | 'revise']} />}
+        {archived ? <ArchivedGeneration record={archived} step={flowStep} /> : <CurrentFlow {...props} />}
       </div>
     </>}
   </div>
@@ -394,8 +399,19 @@ function ReviewStep({ project, draft, viewVersion, setViewVersion, revision, set
 }
 
 function GenerationHistory({ project, selected, onSelect }: { project: ProjectData; selected: string; onSelect: (id: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (event: MouseEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [open])
   const currentConfirmed = project.selectedStrategyIds.length > 0 && project.selectedStrategyIds.every((id) => project.drafts.some((draft) => draft.strategyId === id && draft.confirmed))
-  return <aside className="generation-history"><div className="section-title"><div><h2>生成记录</h2><p>同一项目的多轮内容</p></div></div><div className="history-list"><button className={selected === 'current' ? 'active' : ''} onClick={() => onSelect('current')}><span className="history-status current" /><span><b>{project.currentDraft?.title || '当前生成'}</b><small>{project.currentGeneration.id} · {currentConfirmed ? '已确认' : '进行中'}</small></span></button>{[...project.generationHistory].reverse().map((item) => { const done = archivedCompleted(item)[4]; return <button key={item.id} className={selected === item.id ? 'active' : ''} onClick={() => onSelect(item.id)}><span className="history-status" /><span><b>{item.drafts.at(-1)?.title || '未完成的生成'}</b><small>{item.id} · {done ? '已确认' : '未完成'}</small></span></button> })}</div>{project.generationHistory.length === 0 && <p className="history-empty">完成当前文案后，可以继续创建下一轮。</p>}</aside>
+  const selectRecord = (id: string) => { onSelect(id); setOpen(false) }
+  return <div className={`generation-history ${open ? 'open' : ''}`} ref={containerRef}><button className="secondary generation-history-trigger" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-haspopup="menu"><Archive size={16} />生成记录<span>{project.generationHistory.length + 1}</span><ChevronDown size={15} /></button>{open && <div className="generation-history-panel" role="menu"><div className="history-list"><button className={selected === 'current' ? 'active' : ''} onClick={() => selectRecord('current')} role="menuitem"><span className="history-status current" /><span><b>{project.currentDraft?.title || '当前生成'}</b><small>{project.currentGeneration.id} · {currentConfirmed ? '已确认' : '进行中'}</small></span></button>{[...project.generationHistory].reverse().map((item) => { const done = archivedCompleted(item)[4]; return <button key={item.id} className={selected === item.id ? 'active' : ''} onClick={() => selectRecord(item.id)} role="menuitem"><span className="history-status" /><span><b>{item.drafts.at(-1)?.title || '未完成的生成'}</b><small>{item.id} · {done ? '已确认' : '未完成'}</small></span></button> })}</div>{project.generationHistory.length === 0 && <p className="history-empty">完成当前文案后，可以继续创建下一轮。</p>}</div>}</div>
 }
 
 function ArchivedGeneration({ record, step }: { record: GenerationRecord; step: number }) {
@@ -470,37 +486,52 @@ function GenerationActivity({ stream, busy, project, thinkingEnabled }: { stream
   const matches = busy === 'facts' ? stream.operation === 'facts' : busy === 'strategies' ? stream.operation === 'strategies' : stream.operation.startsWith('draft:')
   const content = matches ? stream.content : ''
   const thinking = matches ? stream.thinking : ''
+  const isThinking = thinkingEnabled && !content.trim() && !stream.done
   if (busy === 'draft' || busy === 'revise') {
     const [, strategyId = '', progress = '1/1'] = stream.operation.split(':')
     const strategy = project.strategies.find((item) => item.id === strategyId)
     const title = partialJsonString(content, 'title')
     const body = partialJsonString(content, 'body')
     const tags = partialJsonStringArray(content, 'hashtags')
-    return <section className="live-document" aria-live="polite"><div className="activity-head"><span><LoaderCircle className="spin" size={16} /></span><div><b>{busy === 'revise' ? '正在生成修订稿' : `正在生成文案 ${progress}`}</b><small>{strategy?.name || '正在组织标题和正文'}</small></div></div><article className="live-paper"><h3>{title || '标题正在成形…'}</h3><div>{body ? body.split('\n').map((line, index) => <p key={index}>{line || '\u00a0'}</p>) : <p className="typing-placeholder">正文会在这里逐段出现…</p>}</div>{tags.length > 0 && <footer>{tags.map((tag) => <span key={tag}>#{tag}</span>)}</footer>}</article>{thinkingEnabled && <ThoughtTrace content={thinking} />}</section>
+    return <section className="live-document" aria-live="polite"><div className="activity-head"><span><LoaderCircle className="spin" size={16} /></span><div><b>{isThinking ? '正在思考' : busy === 'revise' ? '正在生成修订稿' : `正在生成文案 ${progress}`}</b><small>{isThinking ? strategy?.name ? `正在推演「${strategy.name}」的写作路径` : '正在理解要求并规划内容' : strategy?.name || '正在组织标题和正文'}</small></div></div><article className="live-paper"><h3>{title || (isThinking ? '思考完成后开始生成标题' : '标题正在成形…')}</h3><div>{body ? body.split('\n').map((line, index) => <p key={index}>{line || '\u00a0'}</p>) : <p className="typing-placeholder">{isThinking ? '模型正在梳理信息和表达顺序…' : '正文会在这里逐段出现…'}</p>}</div>{tags.length > 0 && <footer>{tags.map((tag) => <span key={tag}>#{tag}</span>)}</footer>}</article>{thinkingEnabled && <ThoughtTrace content={thinking} />}</section>
   }
   const labels = busy === 'facts' ? completedJsonStrings(content, 'category') : completedJsonStrings(content, 'name')
+  const conflicts = busy === 'facts' ? completedJsonStrings(content, 'topic') : []
   const noun = busy === 'facts' ? '组事实' : '条策略'
   const base = busy === 'facts' ? '正在阅读素材并识别口径…' : '正在对照事实与项目素材…'
-  return <section className="generation-activity" aria-live="polite"><div className="activity-head"><span><LoaderCircle className="spin" size={16} /></span><div><b>{busy === 'facts' ? '正在核对业务事实' : '正在生成内容策略'}</b><small>已完成 {labels.length} {noun}</small></div></div><ol className="activity-log"><li className="done"><Check size={13} /><span>{base.replace('正在', '已') .replace('…', '')}</span></li>{labels.map((label, index) => <li className="done" key={`${label}-${index}`}><Check size={13} /><span>{busy === 'facts' ? `已整理第 ${index + 1} 组：${label}` : `已形成第 ${index + 1} 条：${label}`}</span></li>)}<li className="active"><LoaderCircle className="spin" size={13} /><span>{labels.length ? `正在生成第 ${labels.length + 1} ${noun}…` : busy === 'facts' ? '正在整理第 1 组事实…' : '正在生成第 1 条策略…'}</span></li></ol>{thinkingEnabled && <ThoughtTrace content={thinking} />}</section>
+  const hasPromotionalSection = busy === 'facts' && /"promotionalExpressions"\s*:/.test(content)
+  const hasConflictSection = busy === 'facts' && /"conflicts"\s*:/.test(content)
+  const outputComplete = stream.done || /\]\s*}\s*$/.test(content.trim())
+  const activeText = isThinking
+    ? '正在思考…'
+    : outputComplete
+      ? '正在整理生成结果…'
+      : busy === 'facts' && hasConflictSection
+        ? `正在生成第 ${conflicts.length + 1} 处口径冲突…`
+        : busy === 'facts' && hasPromotionalSection
+          ? '正在核对宣传性表达…'
+          : labels.length
+            ? `正在生成第 ${labels.length + 1} ${noun}…`
+            : busy === 'facts' ? '正在整理第 1 组事实…' : '正在生成第 1 条策略…'
+  return <section className="generation-activity" aria-live="polite"><div className="activity-head"><span><LoaderCircle className="spin" size={16} /></span><div><b>{isThinking ? '正在思考' : busy === 'facts' ? '正在核对业务事实' : '正在生成内容策略'}</b><small>{isThinking ? '正在理解输入并规划输出结构' : `已完成 ${labels.length} ${noun}${conflicts.length ? `，识别 ${conflicts.length} 处冲突` : ''}`}</small></div></div><ol className="activity-log">{!isThinking && <li className="done"><Check size={13} /><span>{base.replace('正在', '已').replace('…', '')}</span></li>}{labels.map((label, index) => <li className="done" key={`${label}-${index}`}><Check size={13} /><span>{busy === 'facts' ? `已整理第 ${index + 1} 组：${label}` : `已形成第 ${index + 1} 条：${label}`}</span></li>)}{conflicts.map((label, index) => <li className="done" key={`conflict-${label}-${index}`}><Check size={13} /><span>已识别第 {index + 1} 处口径冲突：{label}</span></li>)}<li className="active"><LoaderCircle className="spin" size={13} /><span>{activeText}</span></li></ol>{thinkingEnabled && <ThoughtTrace content={thinking} />}</section>
 }
 
-function AssetsPage({ project, chooseFolder, importMaterial, downloadAssetTemplate, importAssetBatch, busy, tab, setTab, openAsset, deleteAsset, toggleAsset, goGenerate }: {
-  project: ProjectData | null; chooseFolder: () => void; importMaterial: () => void;
-  downloadAssetTemplate: (kind: BatchAssetKind) => void; importAssetBatch: (kind: BatchAssetKind) => void;
+function AssetsPage({ project, chooseFolder, importMaterial, exportMaterial, downloadAssetTemplate, importAssetBatch, exportAsset, busy, tab, setTab, openAsset, deleteAsset, toggleAsset, goGenerate }: {
+  project: ProjectData | null; chooseFolder: () => void; importMaterial: () => void; exportMaterial: () => void;
+  downloadAssetTemplate: (kind: BatchAssetKind) => void; importAssetBatch: (kind: BatchAssetKind) => void; exportAsset: (kind: AssetKind) => void;
   busy: string; tab: AssetKind; setTab: (tab: AssetKind) => void;
   openAsset: (kind: AssetKind, item?: Keyword | Rule | Reference) => void;
   deleteAsset: (kind: AssetKind, id: string) => void; toggleAsset: (kind: AssetKind, id: string, enabled: boolean) => Promise<boolean>; goGenerate: () => void;
 }) {
   const labels = { keywords: ['关键词', '关键词'], references: ['参考文案', '参考文案'], rules: ['合规准则', '准则'] }
   const items = project?.[tab] || []
-  const batchKind = tab === 'keywords' || tab === 'rules' ? tab : null
-  return <div className="page-content"><PageHeader title="素材管理" action={project && <button className="primary" onClick={goGenerate}><WandSparkles size={17} />前往文案生成</button>}>维护项目的原始素材、关键词、参考文案和合规要求，后续每轮生成都会读取最新版本。</PageHeader>{!project ? <ProjectEmpty recent={[]} openRecent={() => undefined} chooseFolder={chooseFolder} /> : <><section className={`material-card surface-card ${project.material.exists ? 'ready' : ''}`}><span className="large-icon"><FileText size={25} /></span><div><span>业务原始素材</span><h2>{project.material.exists ? '业务原始素材.md' : '尚未导入 Markdown 文件'}</h2><p>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 更新后可重新提取业务事实` : '请先将 PDF 和图片完整转换为 Markdown'}</p></div><button className="secondary" onClick={importMaterial} disabled={!!busy}>{busy === 'material' ? <LoaderCircle className="spin" size={17} /> : <FileText size={17} />}{project.material.exists ? '替换文件' : '导入文件'}</button></section><section className="asset-library surface-card"><div className="asset-tabs">{(Object.keys(labels) as AssetKind[]).map((key) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{labels[key][0]}<span>{project[key].filter((item) => item.enabled).length}/{project[key].length}</span></button>)}</div><div className="asset-toolbar"><div><h2>{labels[tab][0]}</h2><p>{batchKind ? '支持手动维护，也可使用 Excel 模板批量导入。' : '标题和正文必填，话题标签可选。'} 关闭“生效”后，该行不会拼接进模型提示词。</p></div><div className="asset-toolbar-actions">{batchKind && <><button className="secondary compact" onClick={() => downloadAssetTemplate(batchKind)} disabled={!!busy}>{busy === `template-${batchKind}` ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载模板</button><button className="secondary compact" onClick={() => importAssetBatch(batchKind)} disabled={!!busy}>{busy === `import-${batchKind}` ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}批量导入</button></>}<button className="primary compact" onClick={() => openAsset(tab)} disabled={!!busy}><Plus size={16} />新增{labels[tab][1]}</button></div></div>{items.length === 0 ? <div className="compact-empty tall"><Archive size={25} /><b>还没有{labels[tab][0]}</b><span>这类资料可以暂时留空，不会阻断生成流程。</span></div> : <AssetTable kind={tab} items={items} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={toggleAsset} />}</section></>}</div>
+  return <div className="page-content"><PageHeader title="素材管理" action={project && <button className="primary" onClick={goGenerate}><WandSparkles size={17} />前往文案生成</button>}>维护项目的原始素材、关键词、参考文案和合规要求，后续每轮生成都会读取最新版本。</PageHeader>{!project ? <ProjectEmpty recent={[]} openRecent={() => undefined} chooseFolder={chooseFolder} /> : <><section className={`material-card surface-card ${project.material.exists ? 'ready' : ''}`}><span className="large-icon"><FileText size={25} /></span><div><span>业务原始素材</span><h2>{project.material.exists ? '业务原始素材.md' : '尚未导入 Markdown 文件'}</h2><p>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 更新后可重新提取业务事实` : '请先将 PDF 和图片完整转换为 Markdown'}</p></div><div className="material-actions"><button className="secondary compact" onClick={exportMaterial} disabled={!project.material.exists || !!busy}>{busy === 'export-material' ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={importMaterial} disabled={!!busy}>{busy === 'material' ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}{project.material.exists ? '替换文件' : '导入文件'}</button></div></section><section className="asset-library surface-card"><div className="asset-tabs">{(Object.keys(labels) as AssetKind[]).map((key) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{labels[key][0]}<span>{project[key].filter((item) => item.enabled).length}/{project[key].length}</span></button>)}</div><div className="asset-toolbar"><div><h2>{labels[tab][0]}</h2><p>支持手动维护、Excel 批量导入与完整导出。关闭“生效”后，该行不会拼接进模型提示词。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={() => exportAsset(tab)} disabled={!!busy}>{busy === `export-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={() => downloadAssetTemplate(tab)} disabled={!!busy}>{busy === `template-${tab}` ? <LoaderCircle className="spin" size={16} /> : <LayoutTemplate size={16} />}下载模板</button><button className="secondary compact" onClick={() => importAssetBatch(tab)} disabled={!!busy}>{busy === `import-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}批量导入</button><button className="primary compact" onClick={() => openAsset(tab)} disabled={!!busy}><Plus size={16} />新增{labels[tab][1]}</button></div></div>{items.length === 0 ? <div className="compact-empty tall"><Archive size={25} /><b>还没有{labels[tab][0]}</b><span>可新增单条记录，也可下载模板后批量导入。</span></div> : <AssetTable kind={tab} items={items} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={toggleAsset} />}</section></>}</div>
 }
 
 const assetTableHeaders: Record<AssetKind, string[]> = {
-  keywords: ['生效', '编号', '分类', '核心关键词/词根', '词性标签', '痛点/意图标签', '建议用法(槽位)', '操作'],
-  rules: ['生效', '编号', '禁用词/敏感表述', '风险类型', '判定依据', '处理方式', '替代写法', '操作'],
-  references: ['生效', '编号', '标题', '正文', '话题标签', '操作'],
+  keywords: ['编号', '分类', '核心关键词/词根', '词性标签', '痛点/意图标签', '建议用法(槽位)', '操作'],
+  rules: ['编号', '禁用词/敏感表述', '风险类型', '判定依据', '处理方式', '替代写法', '操作'],
+  references: ['编号', '标题', '正文', '话题标签', '操作'],
 }
 
 function displayCell(value?: string) { return value?.trim() || '—' }
@@ -511,7 +542,7 @@ function AssetTable({ kind, items, openAsset, deleteAsset, toggleAsset }: {
   deleteAsset: (kind: AssetKind, id: string) => void;
   toggleAsset: (kind: AssetKind, id: string, enabled: boolean) => Promise<boolean>;
 }) {
-  return <div className="asset-table-scroll"><table className={`asset-data-table ${kind}`}><thead><tr>{assetTableHeaders[kind].map((header) => <th key={header} scope="col">{header}</th>)}</tr></thead><tbody>{items.map((item) => <tr key={item.id} className={item.enabled ? '' : 'disabled-row'}><td className="asset-enabled"><label className="switch"><input type="checkbox" checked={item.enabled} onChange={(event) => toggleAsset(kind, item.id, event.target.checked)} aria-label={`${item.enabled ? '停用' : '启用'} ${item.id}`} /><span /></label></td>{kind === 'keywords' ? <KeywordCells item={item as Keyword} /> : kind === 'rules' ? <RuleCells item={item as Rule} /> : <ReferenceCells item={item as Reference} />}<td className="asset-actions"><div><button className="icon-button" title="编辑" aria-label={`编辑 ${item.id}`} onClick={() => openAsset(kind, item)}><PenLine size={15} /></button><button className="icon-button danger" title="删除" aria-label={`删除 ${item.id}`} onClick={() => deleteAsset(kind, item.id)}><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
+  return <div className="asset-table-scroll"><table className={`asset-data-table ${kind}`}><thead><tr>{assetTableHeaders[kind].map((header) => <th key={header} scope="col">{header}</th>)}</tr></thead><tbody>{items.map((item) => <tr key={item.id} className={item.enabled ? '' : 'disabled-row'}>{kind === 'keywords' ? <KeywordCells item={item as Keyword} /> : kind === 'rules' ? <RuleCells item={item as Rule} /> : <ReferenceCells item={item as Reference} />}<td className="asset-actions"><div><label className="switch" title={item.enabled ? '点击停用' : '点击生效'}><input type="checkbox" checked={item.enabled} onChange={(event) => toggleAsset(kind, item.id, event.target.checked)} aria-label={`${item.enabled ? '停用' : '启用'} ${item.id}`} /><span /></label><button className="icon-button" title="编辑" aria-label={`编辑 ${item.id}`} onClick={() => openAsset(kind, item)}><PenLine size={15} /></button><button className="icon-button danger" title="删除" aria-label={`删除 ${item.id}`} onClick={() => deleteAsset(kind, item.id)}><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
 }
 
 function KeywordCells({ item }: { item: Keyword }) {

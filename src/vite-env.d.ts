@@ -7,12 +7,14 @@ interface Window {
     openRecentProject(folder: string): Promise<ApiResult>
     getRecentProjects(): Promise<string[]>
     importMaterial(): Promise<ApiResult>
+    exportMaterial(): Promise<ApiResult>
     getProject(): Promise<ApiResult>
     saveAsset(kind: AssetKind, value: Record<string, string>): Promise<ApiResult>
     deleteAsset(kind: AssetKind, id: string): Promise<ApiResult>
     toggleAsset(kind: AssetKind, id: string, enabled: boolean): Promise<ApiResult>
     downloadAssetTemplate(kind: BatchAssetKind): Promise<ApiResult>
     importAssetBatch(kind: BatchAssetKind): Promise<ApiResult>
+    exportAsset(kind: AssetKind): Promise<ApiResult>
     getSettings(): Promise<ModelSettings>
     saveSettings(settings: ModelSettings): Promise<ApiResult>
     extractFacts(resolution: string | undefined, thinking: boolean): Promise<ApiResult>
@@ -28,7 +30,7 @@ interface Window {
 }
 
 type AssetKind = 'keywords' | 'references' | 'rules'
-type BatchAssetKind = 'keywords' | 'rules'
+type BatchAssetKind = AssetKind
 type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; savedPath?: string }
 type ModelSettings = { baseUrl: string; apiKey: string; model: string }
 type ModelStreamEvent = { operation: string; kind?: 'content' | 'thinking'; chunk: string; reset?: boolean; done?: boolean }

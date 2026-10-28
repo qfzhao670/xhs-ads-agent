@@ -3,6 +3,7 @@ const fs = require('node:fs')
 const test = require('node:test')
 const {
   assetMarkdownTables,
+  createAssetExportXlsx,
   createTemplateXlsx,
   normalizeAsset,
   readXlsxRows,
@@ -12,8 +13,10 @@ const {
 test('generated templates contain the required headers', () => {
   const keywordRows = readXlsxRows(createTemplateXlsx('keywords'))
   const ruleRows = readXlsxRows(createTemplateXlsx('rules'))
+  const referenceRows = readXlsxRows(createTemplateXlsx('references'))
   assert.deepEqual(keywordRows[0], ['序号', '分类', '核心关键词/词根', '词性标签', '痛点/意图标签', '建议用法(槽位)'])
   assert.deepEqual(ruleRows[0], ['序号', '禁用词/敏感表述', '风险类型', '判定依据', '处理方式', '替代写法'])
+  assert.deepEqual(referenceRows[0], ['序号', '标题', '正文', '话题标签'])
 })
 
 test('batch rows map optional fields and reject missing required values', () => {
@@ -25,7 +28,28 @@ test('batch rows map optional fields and reject missing required values', () => 
   assert.throws(() => rowsToAssets('rules', [
     ['序号', '禁用词/敏感表述', '风险类型'],
     ['1', '', '绝对化表述'],
-  ]), /第 2 行的“禁用词\/敏感表述”为空/)
+  ]), /第 2 行的必填项“禁用词\/敏感表述”为空/)
+})
+
+test('reference rows import hashtags and require both title and body', () => {
+  const records = rowsToAssets('references', [
+    ['序号', '标题', '正文', '话题标签'],
+    ['1', '参考标题', '参考正文', '#亲子研学 佛山周末'],
+  ])
+  assert.deepEqual(records, [{ title: '参考标题', body: '参考正文', hashtags: ['亲子研学', '佛山周末'], enabled: true }])
+  assert.throws(() => rowsToAssets('references', [
+    ['序号', '标题', '正文', '话题标签'],
+    ['1', '只有标题', '', ''],
+  ]), /必填项“正文”为空/)
+})
+
+test('asset exports include status, stable ids, and complete content', () => {
+  const rows = readXlsxRows(createAssetExportXlsx('references', [
+    { id: 'REF-0001', title: '标题', body: '第一行\n第二行', hashtags: ['标签一'], enabled: false },
+  ]))
+  assert.deepEqual(rows[0], ['生效', '编号', '标题', '正文', '话题标签'])
+  assert.deepEqual(rows[1], ['否', 'REF-0001', '标题', '第一行\n第二行', '#标签一'])
+  assert.equal(rowsToAssets('references', rows)[0].enabled, false)
 })
 
 test('legacy records normalize without losing their stable ids', () => {

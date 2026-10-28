@@ -4,6 +4,7 @@ const fsp = require('node:fs/promises')
 const path = require('node:path')
 const {
   assetMarkdownTables,
+  createAssetExportXlsx,
   createTemplateXlsx,
   normalizeAsset,
   readXlsxRows,
@@ -262,6 +263,23 @@ ipcMain.handle('material:import', async () => {
   } catch (error) { return { ok: false, error: error.message } }
 })
 
+ipcMain.handle('material:export', async () => {
+  try {
+    if (!currentRoot) throw new Error('请先创建或打开项目')
+    const source = path.join(currentRoot, '业务原始素材.md')
+    if (!await exists(source)) throw new Error('还没有可导出的业务原始素材')
+    const result = await dialog.showSaveDialog({
+      title: '导出业务原始素材',
+      defaultPath: '业务原始素材.md',
+      buttonLabel: '导出',
+      filters: [{ name: 'Markdown', extensions: ['md'] }],
+    })
+    if (result.canceled || !result.filePath) return { ok: false, error: '' }
+    await fsp.copyFile(source, result.filePath)
+    return { ok: true, savedPath: result.filePath }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
 ipcMain.handle('asset:save', async (_event, kind, value) => {
   try {
     if (!currentRoot || !assetFiles[kind]) throw new Error('项目或资料类型无效')
@@ -290,8 +308,8 @@ ipcMain.handle('asset:save', async (_event, kind, value) => {
 
 ipcMain.handle('asset:template', async (_event, kind) => {
   try {
-    if (!['keywords', 'rules'].includes(kind)) throw new Error('该资料库没有批量导入模板')
-    const label = kind === 'keywords' ? '关键词库' : '合规准则'
+    if (!assetFiles[kind]) throw new Error('该资料库没有批量导入模板')
+    const label = kind === 'keywords' ? '关键词库' : kind === 'references' ? '参考文案库' : '合规准则'
     const result = await dialog.showSaveDialog({
       title: `下载${label}模板`,
       defaultPath: `${label}-模板.xlsx`,
@@ -307,11 +325,11 @@ ipcMain.handle('asset:template', async (_event, kind) => {
 ipcMain.handle('asset:import', async (_event, kind) => {
   try {
     if (!currentRoot) throw new Error('请先创建或打开项目')
-    if (!['keywords', 'rules'].includes(kind)) throw new Error('该资料库不支持 Excel 批量导入')
+    if (!assetFiles[kind]) throw new Error('该资料库不支持 Excel 批量导入')
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
-      title: kind === 'keywords' ? '导入关键词库' : '导入合规准则',
+      title: kind === 'keywords' ? '导入关键词库' : kind === 'references' ? '导入参考文案库' : '导入合规准则',
       buttonLabel: '导入',
     })
     if (result.canceled) return { ok: false, error: '' }
@@ -332,6 +350,22 @@ ipcMain.handle('asset:import', async (_event, kind) => {
     await writeMeta(meta)
     await writeJson(dataPath(assetFiles[kind]), [...items, ...records])
     return { ok: true, imported: records.length, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+ipcMain.handle('asset:export', async (_event, kind) => {
+  try {
+    if (!currentRoot || !assetFiles[kind]) throw new Error('项目或资料类型无效')
+    const label = kind === 'keywords' ? '关键词库' : kind === 'references' ? '参考文案库' : '合规准则'
+    const result = await dialog.showSaveDialog({
+      title: `导出${label}`,
+      defaultPath: `${label}.xlsx`,
+      buttonLabel: '导出',
+      filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }],
+    })
+    if (result.canceled || !result.filePath) return { ok: false, error: '' }
+    const items = await readJson(dataPath(assetFiles[kind]), [])
+    await fsp.writeFile(result.filePath, createAssetExportXlsx(kind, items))
+    return { ok: true, savedPath: result.filePath }
   } catch (error) { return { ok: false, error: error.message } }
 })
 ipcMain.handle('asset:delete', async (_event, kind, id) => {

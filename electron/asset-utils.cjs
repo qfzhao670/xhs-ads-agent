@@ -4,7 +4,7 @@ const zlib = require('node:zlib')
 const assetSchemas = {
   keywords: {
     headers: ['序号', '分类', '核心关键词/词根', '词性标签', '痛点/意图标签', '建议用法(槽位)'],
-    requiredHeader: '核心关键词/词根',
+    requiredHeaders: ['核心关键词/词根'],
     fields: {
       分类: 'category',
       '核心关键词/词根': 'root',
@@ -15,13 +15,22 @@ const assetSchemas = {
   },
   rules: {
     headers: ['序号', '禁用词/敏感表述', '风险类型', '判定依据', '处理方式', '替代写法'],
-    requiredHeader: '禁用词/敏感表述',
+    requiredHeaders: ['禁用词/敏感表述'],
     fields: {
       '禁用词/敏感表述': 'prohibited',
       风险类型: 'riskType',
       判定依据: 'basis',
       处理方式: 'handling',
       替代写法: 'replacement',
+    },
+  },
+  references: {
+    headers: ['序号', '标题', '正文', '话题标签'],
+    requiredHeaders: ['标题', '正文'],
+    fields: {
+      标题: 'title',
+      正文: 'body',
+      话题标签: 'hashtags',
     },
   },
 }
@@ -212,7 +221,10 @@ function rowsToAssets(kind, rows) {
   const header = rows[headerRowIndex].map(text)
   const indexes = {}
   for (const [label, key] of Object.entries(schema.fields)) indexes[key] = header.indexOf(label)
-  if (indexes[schema.fields[schema.requiredHeader]] < 0) throw new Error(`缺少必填列“${schema.requiredHeader}”`)
+  const enabledIndex = header.indexOf('生效')
+  for (const requiredHeader of schema.requiredHeaders) {
+    if (indexes[schema.fields[requiredHeader]] < 0) throw new Error(`缺少必填列“${requiredHeader}”`)
+  }
   const imported = []
   const invalidRows = []
   for (let index = headerRowIndex + 1; index < rows.length; index += 1) {
@@ -223,14 +235,16 @@ function rowsToAssets(kind, rows) {
       const column = indexes[key]
       item[key] = column >= 0 ? text(row[column]) : ''
     }
-    const requiredKey = schema.fields[schema.requiredHeader]
-    if (!item[requiredKey]) invalidRows.push(index + 1)
+    if (enabledIndex >= 0) item.enabled = !['否', 'false', '0', '停用', '禁用'].includes(text(row[enabledIndex]).toLowerCase())
+    const missing = schema.requiredHeaders.filter((label) => !item[schema.fields[label]])
+    if (missing.length) invalidRows.push({ row: index + 1, fields: missing })
     else imported.push(normalizeAsset(kind, item))
   }
   if (invalidRows.length) {
-    const shown = invalidRows.slice(0, 8).join('、')
+    const shown = invalidRows.slice(0, 8).map((item) => item.row).join('、')
     const suffix = invalidRows.length > 8 ? ` 等共 ${invalidRows.length} 行` : ' 行'
-    throw new Error(`第 ${shown}${suffix}的“${schema.requiredHeader}”为空`)
+    const fields = [...new Set(invalidRows.flatMap((item) => item.fields))].join('、')
+    throw new Error(`第 ${shown}${suffix}的必填项“${fields}”为空`)
   }
   if (!imported.length) throw new Error('没有找到可导入的数据行')
   return imported
@@ -302,25 +316,48 @@ function columnName(index) {
   return result
 }
 
-function createTemplateXlsx(kind) {
-  const schema = assetSchemas[kind]
-  if (!schema) throw new Error('该资料库没有可下载的模板')
-  const cells = schema.headers.map((header, index) => `<c r="${columnName(index)}1" t="inlineStr" s="1"><is><t>${xmlEscape(header)}</t></is></c>`).join('')
-  const widths = schema.headers.map((_header, index) => `<col min="${index + 1}" max="${index + 1}" width="${index === 0 ? 10 : 24}" customWidth="1"/>`).join('')
-  const files = {
+function createWorkbookXlsx(headers, rows = []) {
+  const rowXml = [headers, ...rows].map((row, rowIndex) => {
+    const cells = row.map((value, index) => `<c r="${columnName(index)}${rowIndex + 1}" t="inlineStr"${rowIndex === 0 ? ' s="1"' : ''}><is><t xml:space="preserve">${xmlEscape(text(value))}</t></is></c>`).join('')
+    return `<row r="${rowIndex + 1}"${rowIndex === 0 ? ' ht="24" customHeight="1"' : ''}>${cells}</row>`
+  }).join('')
+  const widths = headers.map((header, index) => {
+    const longest = Math.max(text(header).length, ...rows.map((row) => text(row[index]).length))
+    const width = Math.max(index === 0 ? 10 : 14, Math.min(52, longest + 4))
+    return `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`
+  }).join('')
+  return zipFiles({
     '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>',
     '_rels/.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
     'xl/workbook.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>',
     'xl/_rels/workbook.xml.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
     'xl/styles.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Arial"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Arial"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF2563EB"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
-    'xl/worksheets/sheet1.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${widths}</cols><sheetData><row r="1" ht="24" customHeight="1">${cells}</row></sheetData><autoFilter ref="A1:${columnName(schema.headers.length - 1)}1"/></worksheet>`,
-  }
-  return zipFiles(files)
+    'xl/worksheets/sheet1.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${widths}</cols><sheetData>${rowXml}</sheetData><autoFilter ref="A1:${columnName(headers.length - 1)}${Math.max(1, rows.length + 1)}"/></worksheet>`,
+  })
+}
+
+function createTemplateXlsx(kind) {
+  const schema = assetSchemas[kind]
+  if (!schema) throw new Error('该资料库没有可下载的模板')
+  return createWorkbookXlsx(schema.headers)
+}
+
+function createAssetExportXlsx(kind, items) {
+  const schema = assetSchemas[kind]
+  if (!schema) throw new Error('该资料库不支持导出')
+  const fieldEntries = Object.entries(schema.fields)
+  const headers = ['生效', '编号', ...fieldEntries.map(([label]) => label)]
+  const rows = items.map((raw) => {
+    const item = normalizeAsset(kind, raw)
+    return [item.enabled === false ? '否' : '是', item.id, ...fieldEntries.map(([, key]) => Array.isArray(item[key]) ? item[key].map((tag) => `#${tag}`).join(' ') : item[key])]
+  })
+  return createWorkbookXlsx(headers, rows)
 }
 
 module.exports = {
   assetSchemas,
   assetMarkdownTables,
+  createAssetExportXlsx,
   createTemplateXlsx,
   markdownTable,
   normalizeAsset,
