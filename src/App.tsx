@@ -324,7 +324,7 @@ function CurrentFlow(props: GenerationPageProps) {
   if (flowStep === 2) return <FactsStep project={project} busy={props.busy} resolution={props.resolution} setResolution={props.setResolution} thinking={props.thinkingModes.facts} setThinking={(value) => props.setThinkingMode('facts', value)} generate={props.generateFacts} next={() => props.setFlowStep(3)} />
   if (flowStep === 3) return <StrategyStep project={project} busy={props.busy} thinking={props.thinkingModes.strategies} setThinking={(value) => props.setThinkingMode('strategies', value)} generate={props.generateStrategies} choice={props.choice} setChoice={props.setChoice} strategyAdvice={props.strategyAdvice} setStrategyAdvice={props.setStrategyAdvice} save={props.saveStrategy} />
   if (flowStep === 4) return <ComposeStep project={project} strategies={props.selectedStrategies} busy={props.busy} thinking={props.thinkingModes.draft} setThinking={(value) => props.setThinkingMode('draft', value)} generate={props.generateDraft} back={() => props.setFlowStep(3)} />
-  return <ReviewStep project={project} draft={props.draft} viewVersion={props.viewVersion} setViewVersion={props.setViewVersion} revision={props.revision} setRevision={props.setRevision} busy={props.busy} thinking={props.thinkingModes.revise} setThinking={(value) => props.setThinkingMode('revise', value)} revise={props.revise} saveManual={props.saveManual} confirm={props.confirm} newGeneration={props.newGeneration} />
+  return <ReviewStep key={props.draft?.version ?? 'empty'} project={project} draft={props.draft} viewVersion={props.viewVersion} setViewVersion={props.setViewVersion} revision={props.revision} setRevision={props.setRevision} busy={props.busy} thinking={props.thinkingModes.revise} setThinking={(value) => props.setThinkingMode('revise', value)} revise={props.revise} saveManual={props.saveManual} confirm={props.confirm} newGeneration={props.newGeneration} />
 }
 
 function StepHeader({ step, title, children, action }: { step: string; title: string; children: React.ReactNode; action?: React.ReactNode }) {
@@ -380,11 +380,11 @@ function revisionLabel(drafts: Draft[], draft: Draft) {
 }
 
 function ReviewStep({ project, draft, viewVersion, setViewVersion, revision, setRevision, busy, thinking, setThinking, revise, saveManual, confirm, newGeneration }: { project: ProjectData; draft: Draft | null; viewVersion: number | null; setViewVersion: (version: number) => void; revision: string; setRevision: (value: string) => void; busy: string; thinking: boolean; setThinking: (value: boolean) => void; revise: () => void; saveManual: (draft: { version: number; title: string; body: string; hashtags: string }) => Promise<boolean>; confirm: (version: number) => void; newGeneration: () => void }) {
-  const [manual, setManual] = useState({ title: '', body: '', hashtags: '' })
-  useEffect(() => {
-    if (!draft) return
-    setManual({ title: draft.title, body: draft.body, hashtags: draft.hashtags.map((tag) => `#${tag}`).join(' ') })
-  }, [draft?.version])
+  const [manual, setManual] = useState(() => ({
+    title: draft?.title || '',
+    body: draft?.body || '',
+    hashtags: draft?.hashtags.map((tag) => `#${tag}`).join(' ') || '',
+  }))
   if (!draft) return <section className="flow-panel surface-card"><StepHeader step="步骤 5 / 5" title="审核并确认文案">确认前，文案不会成为最终输出。</StepHeader><Gate icon={<FileText size={25} />} message="还没有生成文案" target="请先完成策略选择并生成文案。" /></section>
   const strategy = project.strategies.find((item) => item.id === draft.strategyId)
   const strategyIds = [...new Set([...project.selectedStrategyIds, ...project.drafts.map((item) => item.strategyId)])]
