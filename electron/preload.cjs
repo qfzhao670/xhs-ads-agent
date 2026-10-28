@@ -9,15 +9,22 @@ contextBridge.exposeInMainWorld('workshop', {
   getProject: () => ipcRenderer.invoke('project:get'),
   saveAsset: (kind, value) => ipcRenderer.invoke('asset:save', kind, value),
   deleteAsset: (kind, id) => ipcRenderer.invoke('asset:delete', kind, id),
+  toggleAsset: (kind, id, enabled) => ipcRenderer.invoke('asset:toggle', kind, id, enabled),
   downloadAssetTemplate: (kind) => ipcRenderer.invoke('asset:template', kind),
   importAssetBatch: (kind) => ipcRenderer.invoke('asset:import', kind),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
-  extractFacts: (resolution) => ipcRenderer.invoke('workflow:facts', resolution),
-  generateStrategies: () => ipcRenderer.invoke('workflow:strategies'),
-  selectStrategy: (id, advice) => ipcRenderer.invoke('workflow:select', { id, advice }),
+  extractFacts: (resolution, thinking) => ipcRenderer.invoke('workflow:facts', resolution, thinking),
+  generateStrategies: (thinking) => ipcRenderer.invoke('workflow:strategies', thinking),
+  selectStrategy: (ids, strategyAdvice) => ipcRenderer.invoke('workflow:select', { ids, strategyAdvice }),
   startNewGeneration: () => ipcRenderer.invoke('workflow:new'),
-  generateDraft: () => ipcRenderer.invoke('workflow:draft'),
-  reviseDraft: (request) => ipcRenderer.invoke('workflow:revise', request),
-  confirmDraft: () => ipcRenderer.invoke('workflow:confirm'),
+  generateDraft: (thinking) => ipcRenderer.invoke('workflow:draft', thinking),
+  reviseDraft: (request, version, thinking) => ipcRenderer.invoke('workflow:revise', request, version, thinking),
+  saveManualDraft: (draft) => ipcRenderer.invoke('workflow:manual-save', draft),
+  confirmDraft: (version) => ipcRenderer.invoke('workflow:confirm', version),
+  onModelStream: (callback) => {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('model:stream', listener)
+    return () => ipcRenderer.removeListener('model:stream', listener)
+  },
 })

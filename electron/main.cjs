@@ -53,7 +53,7 @@ async function loadProject() {
   const rules = (await readJson(dataPath(assetFiles.rules), [])).map((item) => normalizeAsset('rules', item))
   const facts = await readJson(outputPath('业务事实.json'), null)
   const strategies = await readJson(outputPath('策略候选.json'), [])
-  const selection = await readJson(outputPath('策略选择.json'), { selectedStrategyId: '', advice: '' })
+  const selection = await readJson(outputPath('策略选择.json'), { selectedStrategyIds: [], selectedStrategyId: '', strategyAdvice: {}, advice: '' })
   const drafts = await readJson(outputPath('终稿版本.json'), [])
   const generationHistory = await readJson(outputPath('生成记录.json'), [])
   const currentGeneration = await readJson(outputPath('当前生成.json'), { id: 'GEN-0001', createdAt: meta.createdAt })
@@ -65,7 +65,13 @@ async function loadProject() {
       content: materialExists ? await fsp.readFile(materialFile, 'utf8') : '',
     },
     keywords, references, rules, facts, strategies,
-    selectedStrategyId: selection.selectedStrategyId || '',
+    selectedStrategyIds: Array.isArray(selection.selectedStrategyIds)
+      ? selection.selectedStrategyIds
+      : selection.selectedStrategyId ? [selection.selectedStrategyId] : [],
+    selectedStrategyId: selection.selectedStrategyId || selection.selectedStrategyIds?.[0] || '',
+    strategyAdvice: selection.strategyAdvice && typeof selection.strategyAdvice === 'object'
+      ? selection.strategyAdvice
+      : selection.selectedStrategyId && selection.advice ? { [selection.selectedStrategyId]: selection.advice } : {},
     advice: selection.advice || '',
     drafts,
     currentDraft: drafts.length ? drafts[drafts.length - 1] : null,
@@ -109,7 +115,23 @@ function parseModelJson(text) {
     throw new Error('模型返回的内容不是有效 JSON，请重试')
   }
 }
-async function callModel(system, user) {
+function contentText(content) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) return content.map((part) => part.text || part.content || '').join('')
+  return ''
+}
+function streamDelta(data) {
+  const delta = data?.choices?.[0]?.delta || {}
+  return {
+    content: contentText(delta.content),
+    thinking: contentText(delta.reasoning_content || delta.reasoning || delta.thinking),
+  }
+}
+function responseThinking(data) {
+  const message = data?.choices?.[0]?.message || {}
+  return contentText(message.reasoning_content || message.reasoning || message.thinking)
+}
+async function callModel(system, user, onChunk = () => {}, thinking = false) {
   const { value } = await userConfig()
   if (!value.apiKey || !value.model || !value.baseUrl) throw new Error('请先在“模型设置”中填写接口地址、API Key 和模型名称')
   let endpoint = value.baseUrl.replace(/\/+$/, '')
@@ -119,14 +141,57 @@ async function callModel(system, user) {
     response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${value.apiKey}` },
-      body: JSON.stringify({ model: value.model, temperature: 0.45, response_format: { type: 'json_object' }, enable_thinking: false, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+      body: JSON.stringify({ model: value.model, temperature: 0.45, stream: true, response_format: { type: 'json_object' }, enable_thinking: Boolean(thinking), messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
     })
   } catch (error) { throw new Error(`无法连接模型接口：${error.message}`) }
   if (!response.ok) {
     const body = await response.text()
     throw new Error(`模型接口返回 ${response.status}：${body.slice(0, 300)}`)
   }
-  return parseModelJson(responseText(await response.json()))
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    const data = await response.json()
+    const text = responseText(data)
+    const reasoning = responseThinking(data)
+    if (reasoning) onChunk('thinking', reasoning)
+    onChunk('content', text)
+    return parseModelJson(text)
+  }
+  if (!response.body) throw new Error('模型接口未返回可读取的流')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let fullText = ''
+  const consume = (line) => {
+    const value = line.trim()
+    if (!value.startsWith('data:')) return
+    const payload = value.slice(5).trim()
+    if (!payload || payload === '[DONE]') return
+    try {
+      const delta = streamDelta(JSON.parse(payload))
+      if (delta.thinking) onChunk('thinking', delta.thinking)
+      if (delta.content) { fullText += delta.content; onChunk('content', delta.content) }
+    } catch { /* Wait for the next complete SSE event. */ }
+  }
+  while (true) {
+    const { done, value: chunk } = await reader.read()
+    buffer += decoder.decode(chunk || new Uint8Array(), { stream: !done })
+    const lines = buffer.split(/\r?\n/)
+    buffer = lines.pop() || ''
+    lines.forEach(consume)
+    if (done) break
+  }
+  if (buffer) consume(buffer)
+  if (!fullText) throw new Error('模型流式返回中没有可读取的内容')
+  return parseModelJson(fullText)
+}
+
+function modelStream(event, operation) {
+  event.sender.send('model:stream', { operation, reset: true, chunk: '' })
+  return (kind, chunk) => event.sender.send('model:stream', { operation, kind, chunk })
+}
+function modelStreamDone(event, operation) {
+  event.sender.send('model:stream', { operation, done: true, chunk: '' })
 }
 
 const modelSystem = '你是严谨的小红书文案工作流引擎。只根据用户提供的信息工作，不得补充、猜测或虚构任何业务事实。必须只输出合法 JSON，不要输出 Markdown 代码块或解释。'
@@ -277,6 +342,17 @@ ipcMain.handle('asset:delete', async (_event, kind, id) => {
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
 })
+ipcMain.handle('asset:toggle', async (_event, kind, id, enabled) => {
+  try {
+    if (!currentRoot || !assetFiles[kind]) throw new Error('项目或资料类型无效')
+    const items = await readJson(dataPath(assetFiles[kind]), [])
+    const index = items.findIndex((item) => item.id === id)
+    if (index < 0) throw new Error('没有找到要修改的记录')
+    items[index] = { ...items[index], enabled: Boolean(enabled), updatedAt: now() }
+    await writeJson(dataPath(assetFiles[kind]), items)
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
 
 ipcMain.handle('settings:get', async () => (await userConfig()).value)
 ipcMain.handle('settings:save', async (_event, settings) => {
@@ -287,13 +363,14 @@ ipcMain.handle('settings:save', async (_event, settings) => {
   } catch (error) { return { ok: false, error: error.message } }
 })
 
-ipcMain.handle('workflow:facts', async (_event, resolution = '') => {
+ipcMain.handle('workflow:facts', async (event, resolution = '', thinking = true) => {
+  const operation = 'facts'
   try {
     const project = await loadProject()
     if (!project?.material.exists) throw new Error('请先导入业务原始素材.md')
     const previous = project.facts?.conflicts?.length ? project.facts.conflicts : []
     const prompt = `请开放式提取并整理以下业务素材中的事实。可能关注产品、人群、场景、卖点、服务、流程、价格、时间、地点、名额、资质、安全、权益和限制，但这些不是必填字段；素材有什么就提取什么，不要把未提及内容判断为缺失。区分可确认事实、宣传性表达和冲突事实。\n\n${resolution ? `上次发现的冲突：${JSON.stringify(previous)}\n用户确认的统一口径：${resolution}\n请重新生成消除冲突后的完整业务事实。\n\n` : ''}原始素材：\n${project.material.content}\n\n输出对象格式：{"confirmedFacts":[{"category":"实际类别","items":["事实"]}],"promotionalExpressions":["表达"],"conflicts":[{"topic":"事项","versions":["口径1","口径2"],"question":"询问用户的简短明确问题"}]}`
-    const result = await callModel(modelSystem, prompt)
+    const result = await callModel(modelSystem, prompt, modelStream(event, operation), thinking)
     const facts = {
       confirmedFacts: Array.isArray(result.confirmedFacts) ? result.confirmedFacts : [],
       promotionalExpressions: Array.isArray(result.promotionalExpressions) ? result.promotionalExpressions : [],
@@ -301,20 +378,22 @@ ipcMain.handle('workflow:facts', async (_event, resolution = '') => {
     }
     await writeJson(outputPath('业务事实.json'), facts)
     if (facts.conflicts.length === 0) await fsp.writeFile(outputPath('业务事实.md'), facts.confirmedFacts.map((g) => `## ${g.category}\n\n${(g.items || []).map((item) => `- ${item}`).join('\n')}`).join('\n\n'), 'utf8')
+    modelStreamDone(event, operation)
     return { ok: true, data: await loadProject() }
-  } catch (error) { return { ok: false, error: error.message } }
+  } catch (error) { modelStreamDone(event, operation); return { ok: false, error: error.message } }
 })
 
-ipcMain.handle('workflow:strategies', async () => {
+ipcMain.handle('workflow:strategies', async (event, thinking = false) => {
+  const operation = 'strategies'
   try {
     const project = await loadProject()
     if (!project?.facts || project.facts.conflicts?.length) throw new Error('请先形成无冲突的完整业务事实')
     const assets = assetMarkdownTables(project)
     const prompt = `根据完整业务事实和项目现有资产，一次性理解全部输入并生成 3–5 个彼此明显不同的文案策略。每个策略只引用真正适合的 1–3 篇参考文案，上限 3 篇；没有合适参考时使用空数组。referenceIds 只能使用给出的稳定编号。每个策略务必简短。\n\n业务事实：${JSON.stringify(project.facts)}\n\n## 关键词库\n\n${assets.keywords}\n\n## 参考文案库\n\n${assets.references}\n\n## 合规准则\n\n${assets.rules}\n\n输出对象格式：{"strategies":[{"name":"策略名称","angle":"一句话核心切入角度","materialPoints":["素材点，2–4个"],"route":"一句话写作路线","referenceIds":["REF-0001"],"bestFor":"最适合的目标"}]}`
-    const result = await callModel(modelSystem, prompt)
+    const result = await callModel(modelSystem, prompt, modelStream(event, operation), thinking)
     const raw = Array.isArray(result.strategies) ? result.strategies.slice(0, 5) : []
     if (raw.length < 3) throw new Error('模型返回的有效策略少于 3 个，请重试')
-    const validRefs = new Set(project.references.map((item) => item.id))
+    const validRefs = new Set(project.references.filter((item) => item.enabled !== false).map((item) => item.id))
     const meta = await readMeta()
     const strategies = raw.map((item) => {
       meta.counters.strategies = (meta.counters.strategies || 0) + 1
@@ -329,16 +408,19 @@ ipcMain.handle('workflow:strategies', async () => {
     })
     await writeMeta(meta)
     await writeJson(outputPath('策略候选.json'), strategies)
-    await writeJson(outputPath('策略选择.json'), { selectedStrategyId: '', advice: '' })
+    await writeJson(outputPath('策略选择.json'), { selectedStrategyIds: [], selectedStrategyId: '', strategyAdvice: {}, advice: '' })
+    modelStreamDone(event, operation)
     return { ok: true, data: await loadProject() }
-  } catch (error) { return { ok: false, error: error.message } }
+  } catch (error) { modelStreamDone(event, operation); return { ok: false, error: error.message } }
 })
 
 ipcMain.handle('workflow:select', async (_event, payload) => {
   try {
     const project = await loadProject()
-    if (!project.strategies.some((item) => item.id === payload.id)) throw new Error('请选择一个有效策略')
-    await writeJson(outputPath('策略选择.json'), { selectedStrategyId: payload.id, advice: String(payload.advice || '').trim(), selectedAt: now() })
+    const ids = Array.isArray(payload.ids) ? [...new Set(payload.ids.map(String))] : payload.id ? [String(payload.id)] : []
+    if (!ids.length || ids.some((id) => !project.strategies.some((item) => item.id === id))) throw new Error('请至少选择一个有效策略')
+    const strategyAdvice = Object.fromEntries(ids.map((id) => [id, String(payload.strategyAdvice?.[id] || '').trim()]).filter(([, value]) => value))
+    await writeJson(outputPath('策略选择.json'), { selectedStrategyIds: ids, selectedStrategyId: ids[0], strategyAdvice, advice: '', selectedAt: now() })
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
 })
@@ -347,15 +429,22 @@ ipcMain.handle('workflow:new', async () => {
   try {
     const project = await loadProject()
     if (!project) throw new Error('请先创建或打开项目')
-    const hasProgress = project.strategies.length > 0 || project.drafts.length > 0 || project.selectedStrategyId
+    const hasProgress = project.strategies.length > 0 || project.drafts.length > 0 || project.selectedStrategyIds.length > 0
     const history = [...project.generationHistory]
     if (hasProgress) {
       history.push({
         id: project.currentGeneration.id,
         createdAt: project.currentGeneration.createdAt,
         archivedAt: now(),
+        material: project.material,
+        keywords: project.keywords,
+        references: project.references,
+        rules: project.rules,
+        facts: project.facts,
         strategies: project.strategies,
+        selectedStrategyIds: project.selectedStrategyIds,
         selectedStrategyId: project.selectedStrategyId,
+        strategyAdvice: project.strategyAdvice,
         advice: project.advice,
         drafts: project.drafts,
       })
@@ -368,55 +457,88 @@ ipcMain.handle('workflow:new', async () => {
     await writeMeta(meta)
     await writeJson(outputPath('当前生成.json'), currentGeneration)
     await writeJson(outputPath('策略候选.json'), [])
-    await writeJson(outputPath('策略选择.json'), { selectedStrategyId: '', advice: '' })
+    await writeJson(outputPath('策略选择.json'), { selectedStrategyIds: [], selectedStrategyId: '', strategyAdvice: {}, advice: '' })
     await writeJson(outputPath('终稿版本.json'), [])
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
 })
 
-async function makeDraft(revisionRequest = '') {
+async function makeDraft(event, revisionRequest = '', baseVersion = null, thinking = false) {
   const project = await loadProject()
-  if (!project?.selectedStrategyId) throw new Error('请先选择一个策略')
-  const strategy = project.strategies.find((item) => item.id === project.selectedStrategyId)
-  if (!strategy) throw new Error('所选策略已不存在')
-  const selectedReferences = project.references.filter((item) => strategy.referenceIds.includes(item.id))
-  const assets = assetMarkdownTables(project, selectedReferences)
-  const base = revisionRequest && project.currentDraft
-    ? `请在保持同一策略的前提下修改当前终稿。\n当前终稿：${JSON.stringify(project.currentDraft)}\n新的修改要求：${revisionRequest}`
-    : '请根据选定策略直接生成终稿。'
-  const prompt = `${base}\n\n只能使用以下业务事实：${JSON.stringify(project.facts)}\n选定的唯一策略：${JSON.stringify(strategy)}\n用户最初补充建议：${project.advice || '无'}\n\n## 关键词库\n\n${assets.keywords}\n\n## 合规准则\n\n${assets.rules}\n\n## 只可参考以下已选中的完整参考文案\n\n${assets.references}\n\n遵循策略的核心主题和信息取舍；关键词自然融入，不机械堆砌；参考文案只模仿选题方式、钩子、结构、节奏和语感，不复制原句或业务信息；遵守合规准则。输出对象格式：{"title":"标题","body":"正文","hashtags":["话题标签，不含#"]}`
-  const result = await callModel(modelSystem, prompt)
-  if (!result.title || !result.body) throw new Error('模型返回的终稿缺少标题或正文，请重试')
-  const version = project.drafts.length + 1
-  const draft = {
-    version, title: String(result.title).trim(), body: String(result.body).trim(),
-    hashtags: Array.isArray(result.hashtags) ? result.hashtags.map((tag) => String(tag).replace(/^#/, '').trim()).filter(Boolean) : [],
-    strategyId: strategy.id, referenceIds: strategy.referenceIds, revisionRequest, createdAt: now(), confirmed: false,
+  if (!project?.selectedStrategyIds?.length) throw new Error('请先选择至少一个策略')
+  const baseDraft = revisionRequest
+    ? project.drafts.find((item) => item.version === Number(baseVersion)) || project.currentDraft
+    : null
+  const strategyIds = baseDraft ? [baseDraft.strategyId] : project.selectedStrategyIds
+  const strategies = strategyIds.map((id) => project.strategies.find((item) => item.id === id)).filter(Boolean)
+  if (!strategies.length) throw new Error('所选策略已不存在')
+  const drafts = [...project.drafts]
+  for (const [index, strategy] of strategies.entries()) {
+    const selectedReferences = project.references.filter((item) => item.enabled !== false && strategy.referenceIds.includes(item.id))
+    const assets = assetMarkdownTables(project, selectedReferences)
+    const base = revisionRequest && baseDraft
+      ? `请在保持同一策略的前提下修改当前终稿。\n当前终稿：${JSON.stringify(baseDraft)}\n新的修改要求：${revisionRequest}`
+      : '请根据选定策略直接生成一篇独立终稿。'
+    const strategyAdvice = project.strategyAdvice?.[strategy.id] || project.advice || '无'
+    const prompt = `${base}\n\n只能使用以下业务事实：${JSON.stringify(project.facts)}\n选定策略：${JSON.stringify(strategy)}\n该策略的补充要求：${strategyAdvice}\n\n## 关键词库\n\n${assets.keywords}\n\n## 合规准则\n\n${assets.rules}\n\n## 只可参考以下已选中的完整参考文案\n\n${assets.references}\n\n遵循策略的核心主题和信息取舍；关键词自然融入，不机械堆砌；参考文案只模仿选题方式、钩子、结构、节奏和语感，不复制原句或业务信息；遵守合规准则。输出对象格式：{"title":"标题","body":"正文","hashtags":["话题标签，不含#"]}`
+    const operation = `draft:${strategy.id}:${index + 1}/${strategies.length}`
+    const result = await callModel(modelSystem, prompt, modelStream(event, operation), thinking)
+    if (!result.title || !result.body) throw new Error('模型返回的终稿缺少标题或正文，请重试')
+    const version = drafts.length + 1
+    const draft = {
+      version, title: String(result.title).trim(), body: String(result.body).trim(),
+      hashtags: Array.isArray(result.hashtags) ? result.hashtags.map((tag) => String(tag).replace(/^#/, '').trim()).filter(Boolean) : [],
+      strategyId: strategy.id, referenceIds: strategy.referenceIds, revisionRequest, createdAt: now(), confirmed: false,
+    }
+    for (let draftIndex = 0; draftIndex < drafts.length; draftIndex += 1) {
+      if (drafts[draftIndex].strategyId === strategy.id) drafts[draftIndex] = { ...drafts[draftIndex], confirmed: false }
+    }
+    drafts.push(draft)
+    await writeJson(outputPath('终稿版本.json'), drafts)
+    const markdown = `# ${draft.title}\n\n${draft.body}\n\n${draft.hashtags.map((tag) => `#${tag}`).join(' ')}\n`
+    await fsp.writeFile(outputPath(`${project.currentGeneration.id}_终稿_v${version}.md`), markdown, 'utf8')
+    modelStreamDone(event, operation)
   }
-  const drafts = [...project.drafts, draft]
-  await writeJson(outputPath('终稿版本.json'), drafts)
-  const markdown = `# ${draft.title}\n\n${draft.body}\n\n${draft.hashtags.map((tag) => `#${tag}`).join(' ')}\n`
-  await fsp.writeFile(outputPath(`${project.currentGeneration.id}_终稿_v${version}.md`), markdown, 'utf8')
   return loadProject()
 }
-ipcMain.handle('workflow:draft', async () => {
-  try { return { ok: true, data: await makeDraft() } } catch (error) { return { ok: false, error: error.message } }
+ipcMain.handle('workflow:draft', async (event, thinking = false) => {
+  try { return { ok: true, data: await makeDraft(event, '', null, thinking) } } catch (error) { return { ok: false, error: error.message } }
 })
-ipcMain.handle('workflow:revise', async (_event, request) => {
+ipcMain.handle('workflow:revise', async (event, request, version, thinking = false) => {
   try {
     if (!String(request || '').trim()) throw new Error('请填写本次修改要求')
-    return { ok: true, data: await makeDraft(String(request).trim()) }
+    return { ok: true, data: await makeDraft(event, String(request).trim(), version, thinking) }
   } catch (error) { return { ok: false, error: error.message } }
 })
-ipcMain.handle('workflow:confirm', async () => {
+ipcMain.handle('workflow:manual-save', async (_event, payload) => {
+  try {
+    const project = await loadProject()
+    const source = project?.drafts.find((item) => item.version === Number(payload.version))
+    if (!source) throw new Error('没有找到要编辑的文案')
+    const title = String(payload.title || '').trim()
+    const body = String(payload.body || '').trim()
+    if (!title || !body) throw new Error('标题和正文不能为空')
+    const hashtags = Array.isArray(payload.hashtags) ? payload.hashtags : String(payload.hashtags || '').split(/[\s,，、]+/)
+    const draft = { ...source, version: project.drafts.length + 1, title, body, hashtags: [...new Set(hashtags.map((tag) => String(tag).replace(/^#+/, '').trim()).filter(Boolean))], revisionRequest: '手动编辑', createdAt: now(), confirmed: false }
+    const previous = project.drafts.map((item) => item.strategyId === source.strategyId ? { ...item, confirmed: false } : item)
+    await writeJson(outputPath('终稿版本.json'), [...previous, draft])
+    const markdown = `# ${draft.title}\n\n${draft.body}\n\n${draft.hashtags.map((tag) => `#${tag}`).join(' ')}\n`
+    await fsp.writeFile(outputPath(`${project.currentGeneration.id}_终稿_v${draft.version}.md`), markdown, 'utf8')
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+ipcMain.handle('workflow:confirm', async (_event, version) => {
   try {
     const project = await loadProject()
     if (!project?.drafts.length) throw new Error('还没有可以确认的终稿')
-    const drafts = project.drafts.map((item, index) => ({ ...item, confirmed: index === project.drafts.length - 1 }))
+    const targetVersion = Number(version) || project.currentDraft.version
+    const target = project.drafts.find((item) => item.version === targetVersion)
+    if (!target) throw new Error('没有找到要确认的版本')
+    const drafts = project.drafts.map((item) => item.strategyId === target.strategyId ? { ...item, confirmed: item.version === targetVersion } : item)
     await writeJson(outputPath('终稿版本.json'), drafts)
-    const draft = drafts[drafts.length - 1]
+    const draft = drafts.find((item) => item.version === targetVersion)
     const markdown = `# ${draft.title}\n\n${draft.body}\n\n${draft.hashtags.map((tag) => `#${tag}`).join(' ')}\n`
-    await fsp.writeFile(outputPath(`${project.currentGeneration.id}_最终输出.md`), markdown, 'utf8')
+    await fsp.writeFile(outputPath(`${project.currentGeneration.id}_最终输出_v${draft.version}.md`), markdown, 'utf8')
     await fsp.writeFile(outputPath('最终输出.md'), markdown, 'utf8')
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }

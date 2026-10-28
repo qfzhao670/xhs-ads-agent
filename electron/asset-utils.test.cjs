@@ -21,7 +21,7 @@ test('batch rows map optional fields and reject missing required values', () => 
     ['序号', '分类', '核心关键词/词根', '词性标签', '痛点/意图标签', '建议用法(槽位)'],
     ['1', '地域人群', '佛山家长', '核心词', '精准人群', '{人群}'],
   ])
-  assert.deepEqual(records, [{ category: '地域人群', root: '佛山家长', partOfSpeech: '核心词', intentTag: '精准人群', suggestedUse: '{人群}' }])
+  assert.deepEqual(records, [{ category: '地域人群', root: '佛山家长', partOfSpeech: '核心词', intentTag: '精准人群', suggestedUse: '{人群}', enabled: true }])
   assert.throws(() => rowsToAssets('rules', [
     ['序号', '禁用词/敏感表述', '风险类型'],
     ['1', '', '绝对化表述'],
@@ -43,6 +43,18 @@ test('prompt assets are Markdown tables with escaped content', () => {
   assert.match(tables.keywords, /第一行<br>第二行/)
   assert.match(tables.references, /标签一、标签二/)
   assert.match(tables.rules, /\| （暂无记录） \|/)
+})
+
+test('disabled assets are excluded from prompt tables', () => {
+  const tables = assetMarkdownTables({
+    keywords: [{ id: 'KW-0001', root: '生效词', enabled: true }, { id: 'KW-0002', root: '停用词', enabled: false }],
+    references: [{ id: 'REF-0001', title: '生效参考', body: '正文', enabled: true }, { id: 'REF-0002', title: '停用参考', body: '正文', enabled: false }],
+    rules: [{ id: 'RULE-0001', prohibited: '生效准则', enabled: true }, { id: 'RULE-0002', prohibited: '停用准则', enabled: false }],
+  })
+  assert.match(tables.keywords, /生效词/)
+  assert.doesNotMatch(tables.keywords, /停用词/)
+  assert.doesNotMatch(tables.references, /停用参考/)
+  assert.doesNotMatch(tables.rules, /停用准则/)
 })
 
 for (const fixture of [

@@ -37,9 +37,11 @@ function parseHashtags(value) {
 }
 
 function normalizeAsset(kind, value = {}) {
+  const enabled = value.enabled !== false
   if (kind === 'keywords') {
     return {
       ...value,
+      enabled,
       category: text(value.category),
       root: text(value.root || value.value),
       partOfSpeech: text(value.partOfSpeech),
@@ -50,6 +52,7 @@ function normalizeAsset(kind, value = {}) {
   if (kind === 'rules') {
     return {
       ...value,
+      enabled,
       prohibited: text(value.prohibited || value.content),
       riskType: text(value.riskType),
       basis: text(value.basis),
@@ -60,6 +63,7 @@ function normalizeAsset(kind, value = {}) {
   if (kind === 'references') {
     return {
       ...value,
+      enabled,
       title: text(value.title),
       body: text(value.body),
       hashtags: parseHashtags(value.hashtags),
@@ -85,15 +89,16 @@ function markdownTable(items, columns) {
 }
 
 function assetMarkdownTables(project, references = project.references) {
+  const enabled = (items) => items.filter((item) => item.enabled !== false)
   return {
-    keywords: markdownTable(project.keywords.map((item) => normalizeAsset('keywords', item)), [
+    keywords: markdownTable(enabled(project.keywords).map((item) => normalizeAsset('keywords', item)), [
       ['编号', 'id'], ['分类', 'category'], ['核心关键词/词根', 'root'], ['词性标签', 'partOfSpeech'],
       ['痛点/意图标签', 'intentTag'], ['建议用法(槽位)', 'suggestedUse'],
     ]),
-    references: markdownTable(references.map((item) => normalizeAsset('references', item)), [
+    references: markdownTable(enabled(references).map((item) => normalizeAsset('references', item)), [
       ['编号', 'id'], ['标题', 'title'], ['正文', 'body'], ['话题标签', 'hashtags'],
     ]),
-    rules: markdownTable(project.rules.map((item) => normalizeAsset('rules', item)), [
+    rules: markdownTable(enabled(project.rules).map((item) => normalizeAsset('rules', item)), [
       ['编号', 'id'], ['禁用词/敏感表述', 'prohibited'], ['风险类型', 'riskType'], ['判定依据', 'basis'],
       ['处理方式', 'handling'], ['替代写法', 'replacement'],
     ]),
