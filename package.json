@@ -12,7 +12,8 @@
     "check": "tsc --noEmit -p tsconfig.app.json --pretty false && vite build",
     "test": "node --test electron/*.test.cjs",
     "package": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "latest",
@@ -41,7 +42,6 @@
         "to": "icon.png"
       }
     ],
-    "electronDist": "node_modules/electron/dist",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -54,7 +54,13 @@
     },
     "win": {
       "icon": "build/icon.png",
-      "target": "nsis"
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
     },
     "linux": {
       "icon": "build/icon.png",
