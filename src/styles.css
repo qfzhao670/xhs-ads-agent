@@ -196,7 +196,7 @@ button.generation-history-trigger { padding-inline: 13px 11px; }
 .strategy-row:hover { border-color: #bfdbfe; transform: translateY(-2px); box-shadow: 0 5px 10px rgba(15, 23, 42, .07); }
 .strategy-row.selected { border-color: #60a5fa; background: var(--blue-soft); box-shadow: 0 0 0 2px #dbeafe; }
 .strategy-radio { display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid var(--gray-300); border-radius: 50%; color: white; background: white; }
-.strategy-row.selected .strategy-radio { border-color: var(--blue); background: var(--blue); }
+.strategy-item.selected .strategy-radio { border-color: var(--blue); background: var(--blue); }
 .strategy-copy { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .strategy-copy > span { display: flex; align-items: center; gap: 8px; }
 .strategy-copy code { color: var(--blue-dark); font-size: 9px; }

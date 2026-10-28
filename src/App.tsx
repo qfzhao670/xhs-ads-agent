@@ -478,15 +478,29 @@ function partialJsonStringArray(source: string, key: string) {
 }
 
 function ThoughtTrace({ content }: { content: string }) {
+  const contentRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const viewport = contentRef.current
+    if (viewport) viewport.scrollTop = viewport.scrollHeight
+  }, [content])
+
   if (!content.trim()) return <div className="thought-wait"><Brain size={15} /><span>正在等待思考轨迹…</span></div>
-  return <details className="thought-trace" open><summary><Brain size={15} />思考过程<span>仅显示模型返回的思考文本</span></summary><div>{content}</div></details>
+  return <details className="thought-trace" open><summary><Brain size={15} />思考过程<span>仅显示模型返回的思考文本</span></summary><div ref={contentRef}>{content}</div></details>
 }
 
 function GenerationActivity({ stream, busy, project, thinkingEnabled }: { stream: { operation: string; content: string; thinking: string; done: boolean }; busy: string; project: ProjectData; thinkingEnabled: boolean }) {
+  const activityLogRef = useRef<HTMLOListElement>(null)
   const matches = busy === 'facts' ? stream.operation === 'facts' : busy === 'strategies' ? stream.operation === 'strategies' : stream.operation.startsWith('draft:')
   const content = matches ? stream.content : ''
   const thinking = matches ? stream.thinking : ''
   const isThinking = thinkingEnabled && !content.trim() && !stream.done
+
+  useEffect(() => {
+    const viewport = activityLogRef.current
+    if (viewport) viewport.scrollTop = viewport.scrollHeight
+  }, [content])
+
   if (busy === 'draft' || busy === 'revise') {
     const [, strategyId = '', progress = '1/1'] = stream.operation.split(':')
     const strategy = project.strategies.find((item) => item.id === strategyId)
@@ -513,7 +527,7 @@ function GenerationActivity({ stream, busy, project, thinkingEnabled }: { stream
           : labels.length
             ? `正在生成第 ${labels.length + 1} ${noun}…`
             : busy === 'facts' ? '正在整理第 1 组事实…' : '正在生成第 1 条策略…'
-  return <section className="generation-activity" aria-live="polite"><div className="activity-head"><span><LoaderCircle className="spin" size={16} /></span><div><b>{isThinking ? '正在思考' : busy === 'facts' ? '正在核对业务事实' : '正在生成内容策略'}</b><small>{isThinking ? '正在理解输入并规划输出结构' : `已完成 ${labels.length} ${noun}${conflicts.length ? `，识别 ${conflicts.length} 处冲突` : ''}`}</small></div></div><ol className="activity-log">{!isThinking && <li className="done"><Check size={13} /><span>{base.replace('正在', '已').replace('…', '')}</span></li>}{labels.map((label, index) => <li className="done" key={`${label}-${index}`}><Check size={13} /><span>{busy === 'facts' ? `已整理第 ${index + 1} 组：${label}` : `已形成第 ${index + 1} 条：${label}`}</span></li>)}{conflicts.map((label, index) => <li className="done" key={`conflict-${label}-${index}`}><Check size={13} /><span>已识别第 {index + 1} 处口径冲突：{label}</span></li>)}<li className="active"><LoaderCircle className="spin" size={13} /><span>{activeText}</span></li></ol>{thinkingEnabled && <ThoughtTrace content={thinking} />}</section>
+  return <section className="generation-activity" aria-live="polite"><div className="activity-head"><span><LoaderCircle className="spin" size={16} /></span><div><b>{isThinking ? '正在思考' : busy === 'facts' ? '正在核对业务事实' : '正在生成内容策略'}</b><small>{isThinking ? '正在理解输入并规划输出结构' : `已完成 ${labels.length} ${noun}${conflicts.length ? `，识别 ${conflicts.length} 处冲突` : ''}`}</small></div></div><ol className="activity-log" ref={activityLogRef}>{!isThinking && <li className="done"><Check size={13} /><span>{base.replace('正在', '已').replace('…', '')}</span></li>}{labels.map((label, index) => <li className="done" key={`${label}-${index}`}><Check size={13} /><span>{busy === 'facts' ? `已整理第 ${index + 1} 组：${label}` : `已形成第 ${index + 1} 条：${label}`}</span></li>)}{conflicts.map((label, index) => <li className="done" key={`conflict-${label}-${index}`}><Check size={13} /><span>已识别第 {index + 1} 处口径冲突：{label}</span></li>)}<li className="active"><LoaderCircle className="spin" size={13} /><span>{activeText}</span></li></ol>{thinkingEnabled && <ThoughtTrace content={thinking} />}</section>
 }
 
 function AssetsPage({ project, chooseFolder, importMaterial, exportMaterial, downloadAssetTemplate, importAssetBatch, exportAsset, busy, tab, setTab, openAsset, deleteAsset, toggleAsset, goGenerate }: {
