@@ -16,6 +16,7 @@ interface Window {
     importAssetBatch(kind: BatchAssetKind): Promise<ApiResult>
     exportAsset(kind: AssetKind): Promise<ApiResult>
     getSettings(): Promise<ModelSettings>
+    readClipboardText(): Promise<string>
     saveSettings(settings: ModelSettings): Promise<ApiResult>
     extractFacts(resolution: string | undefined, thinking: boolean): Promise<ApiResult>
     generateStrategies(thinking: boolean): Promise<ApiResult>

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron')
+const { app, BrowserWindow, clipboard, dialog, ipcMain } = require('electron')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const path = require('node:path')
@@ -395,6 +395,7 @@ ipcMain.handle('asset:toggle', async (_event, kind, id, enabled) => {
 })
 
 ipcMain.handle('settings:get', async () => (await userConfig()).value)
+ipcMain.handle('clipboard:read-text', () => clipboard.readText())
 ipcMain.handle('settings:save', async (_event, settings) => {
   try {
     const { file } = await userConfig()

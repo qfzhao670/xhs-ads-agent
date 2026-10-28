@@ -406,12 +406,18 @@ button.generation-history-trigger { padding-inline: 13px 11px; }
 .settings-card > .panel-actions { margin: 22px 24px 0; padding-bottom: 24px; }
 
 .field { display: flex; flex-direction: column; gap: 7px; }
-.field > span { color: var(--gray-700); font-size: 11px; font-weight: 600; }
+.field > span, .field > label { color: var(--gray-700); font-size: 11px; font-weight: 600; }
 .field small { color: var(--gray-500); font-size: 9px; font-weight: 400; }
 .field input, .field textarea { width: 100%; padding: 10px 11px; border: 1px solid var(--gray-300); border-radius: 8px; color: var(--gray-900); background: white; font-size: 12px; resize: vertical; transition: border-color 150ms ease-out, box-shadow 150ms ease-out; }
 .field input { height: 42px; }
 .field input:focus, .field textarea:focus { border-color: #3b82f6; outline: 2px solid #3b82f6; outline-offset: 2px; box-shadow: 0 0 0 1px white; }
 .field input::placeholder, .field textarea::placeholder { color: #9ca3af; }
+.secret-input { position: relative; }
+.secret-input input { padding-right: 112px; }
+.secret-actions { position: absolute; top: 5px; right: 5px; display: flex; gap: 3px; }
+.secret-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 32px; padding: 0 8px; border: 0; border-radius: 6px; color: var(--gray-600); background: var(--gray-100); font-size: 10px; font-weight: 600; cursor: pointer; transition: color 150ms ease-out, background 150ms ease-out; }
+.secret-actions button:first-child { width: 32px; padding: 0; }
+.secret-actions button:hover { color: var(--blue-dark); background: var(--blue-soft); }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 32px; background: rgba(15, 23, 42, .46); }
 .modal { overflow: auto; width: min(620px, 100%); max-height: calc(100vh - 64px); border: 1px solid var(--gray-200); border-radius: 12px; background: white; box-shadow: 0 16px 40px rgba(15, 23, 42, .2); }

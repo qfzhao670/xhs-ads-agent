@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive, BookOpenText, Brain, Check, CheckCircle2, ChevronDown, ChevronRight,
-  Circle, Download, FileText, FolderOpen, KeyRound, LayoutTemplate, LoaderCircle,
+  Circle, ClipboardPaste, Download, Eye, EyeOff, FileText, FolderOpen, KeyRound, LayoutTemplate, LoaderCircle,
   PackageOpen, PenLine, Plus, RefreshCw, Save, Scale, Settings, SlidersHorizontal,
   Sparkles, Trash2, Upload, WandSparkles, X,
 } from 'lucide-react'
@@ -572,7 +572,14 @@ function ReferenceCells({ item }: { item: Reference }) {
 }
 
 function SettingsPage({ settings, setSettings, save, busy }: { settings: ModelSettings; setSettings: (settings: ModelSettings) => void; save: () => void; busy: string }) {
-  return <div className="page-content settings-page"><PageHeader title="设置">配置用于提取事实、生成策略与撰写文案的模型服务。设置保存在本机，不会写入项目目录。</PageHeader><section className="settings-card surface-card"><div className="settings-heading"><span className="large-icon"><KeyRound size={22} /></span><div><h2>模型连接</h2><p>支持 OpenAI Chat Completions 兼容接口。</p></div><span className={`connection-badge ${settings.apiKey && settings.model ? 'ready' : ''}`}>{settings.apiKey && settings.model ? '已配置' : '待配置'}</span></div><div className="settings-form"><label className="field"><span>接口地址</span><input value={settings.baseUrl} onChange={(e) => setSettings({ ...settings, baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" /></label><label className="field"><span>API Key</span><input type="password" value={settings.apiKey} onChange={(e) => setSettings({ ...settings, apiKey: e.target.value })} placeholder="sk-…" /></label><label className="field"><span>模型名称</span><input value={settings.model} onChange={(e) => setSettings({ ...settings, model: e.target.value })} placeholder="例如 gpt-5-mini" /></label></div><div className="security-note"><KeyRound size={16} /><span>密钥仅保存在本机应用数据中，请勿在共享设备上使用个人密钥。</span></div><div className="panel-actions right"><button className="primary" onClick={save} disabled={!!busy}>{busy === 'settings' ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}保存设置</button></div></section></div>
+  const [showApiKey, setShowApiKey] = useState(false)
+
+  async function pasteApiKey() {
+    const apiKey = (await window.workshop.readClipboardText()).trim()
+    if (apiKey) setSettings({ ...settings, apiKey })
+  }
+
+  return <div className="page-content settings-page"><PageHeader title="设置">配置用于提取事实、生成策略与撰写文案的模型服务。设置保存在本机，不会写入项目目录。</PageHeader><section className="settings-card surface-card"><div className="settings-heading"><span className="large-icon"><KeyRound size={22} /></span><div><h2>模型连接</h2><p>支持 OpenAI Chat Completions 兼容接口。</p></div><span className={`connection-badge ${settings.apiKey && settings.model ? 'ready' : ''}`}>{settings.apiKey && settings.model ? '已配置' : '待配置'}</span></div><div className="settings-form"><label className="field"><span>接口地址</span><input value={settings.baseUrl} onChange={(e) => setSettings({ ...settings, baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" /></label><div className="field"><label htmlFor="api-key">API Key</label><div className="secret-input"><input id="api-key" type={showApiKey ? 'text' : 'password'} value={settings.apiKey} onChange={(e) => setSettings({ ...settings, apiKey: e.target.value })} placeholder="sk-…" autoComplete="off" /><div className="secret-actions"><button type="button" onClick={() => setShowApiKey((visible) => !visible)} title={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'}>{showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}</button><button type="button" onClick={pasteApiKey} title="从剪贴板粘贴 API Key"><ClipboardPaste size={15} /><span>粘贴</span></button></div></div></div><label className="field"><span>模型名称</span><input value={settings.model} onChange={(e) => setSettings({ ...settings, model: e.target.value })} placeholder="例如 gpt-5-mini" /></label></div><div className="security-note"><KeyRound size={16} /><span>密钥仅保存在本机应用数据中，请勿在共享设备上使用个人密钥。</span></div><div className="panel-actions right"><button className="primary" onClick={save} disabled={!!busy}>{busy === 'settings' ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}保存设置</button></div></section></div>
 }
 
 function ActionState({ icon, title, description, button }: { icon: React.ReactNode; title: string; description: string; button: React.ReactNode }) {

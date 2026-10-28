@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('workshop', {
   importAssetBatch: (kind) => ipcRenderer.invoke('asset:import', kind),
   exportAsset: (kind) => ipcRenderer.invoke('asset:export', kind),
   getSettings: () => ipcRenderer.invoke('settings:get'),
+  readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),
   saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
   extractFacts: (resolution, thinking) => ipcRenderer.invoke('workflow:facts', resolution, thinking),
   generateStrategies: (thinking) => ipcRenderer.invoke('workflow:strategies', thinking),
