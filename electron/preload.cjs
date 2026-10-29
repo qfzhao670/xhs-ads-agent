@@ -40,6 +40,11 @@ contextBridge.exposeInMainWorld('workshop', {
     ipcRenderer.on('image:progress', listener)
     return () => ipcRenderer.removeListener('image:progress', listener)
   },
+  onImageReferenceProgress: (callback) => {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('image-reference:progress', listener)
+    return () => ipcRenderer.removeListener('image-reference:progress', listener)
+  },
   onModelStream: (callback) => {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('model:stream', listener)

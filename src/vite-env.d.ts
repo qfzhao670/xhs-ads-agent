@@ -37,6 +37,7 @@ interface Window {
     exportGeneratedImage(taskId: string, imageId: string): Promise<ApiResult>
     exportImageSet(taskId: string): Promise<ApiResult>
     onImageProgress(callback: (payload: ImageProgressEvent) => void): () => void
+    onImageReferenceProgress(callback: (payload: ImageReferenceProgressEvent) => void): () => void
     onModelStream(callback: (payload: ModelStreamEvent) => void): () => void
   }
 }
@@ -50,7 +51,14 @@ type ImageModelSettings = {
 }
 type ModelSettings = { baseUrl: string; apiKey: string; model: string; visionModel: string; image: ImageModelSettings }
 type ModelStreamEvent = { operation: string; kind?: 'content' | 'thinking'; chunk: string; reset?: boolean; done?: boolean }
-type ImageProgressEvent = { version: number; pageId?: string; phase: 'planning' | 'rewriting' | 'generating' | 'done'; current: number; total: number; label: string }
+type ImageProgressEvent = {
+  version: number; pageId?: string; phase: 'planning' | 'rewriting' | 'generating' | 'page-done' | 'done';
+  current: number; total: number; label: string; task?: ImageTask
+}
+type ImageReferenceProgressEvent = {
+  phase: 'added' | 'tagging' | 'item-done' | 'done'; current: number; total: number; label: string;
+  references?: ImageReference[]; reference?: ImageReference
+}
 
 type Keyword = {
   id: string; category: string; root: string; partOfSpeech: string; intentTag: string;

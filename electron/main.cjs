@@ -769,7 +769,7 @@ async function retagImageReference(items, index) {
   return items[index]
 }
 
-ipcMain.handle('image-reference:upload', async (_event, isCover) => {
+ipcMain.handle('image-reference:upload', async (event, isCover) => {
   try {
     if (!currentRoot) throw new Error('请先创建或打开项目')
     const result = await dialog.showOpenDialog({
@@ -820,11 +820,30 @@ ipcMain.handle('image-reference:upload', async (_event, isCover) => {
     }
     await writeMeta(meta)
     await saveImageReferences(items)
+    event.sender.send('image-reference:progress', {
+      phase: 'added', current: 0, total: createdIndexes.length,
+      label: `已导入 ${createdIndexes.length} 张图片，准备分析`,
+      references: createdIndexes.map((index) => items[index]),
+    })
     let failed = 0
-    for (const index of createdIndexes) {
+    for (let position = 0; position < createdIndexes.length; position += 1) {
+      const index = createdIndexes[position]
+      event.sender.send('image-reference:progress', {
+        phase: 'tagging', current: position + 1, total: createdIndexes.length,
+        label: `正在分析第 ${position + 1} 张图片`, reference: items[index],
+      })
       const tagged = await retagImageReference(items, index)
       if (tagged.taggingStatus !== 'ready') failed += 1
+      event.sender.send('image-reference:progress', {
+        phase: 'item-done', current: position + 1, total: createdIndexes.length,
+        label: tagged.taggingStatus === 'ready' ? `第 ${position + 1} 张图片分析完成` : `第 ${position + 1} 张图片分析失败`,
+        reference: tagged,
+      })
     }
+    event.sender.send('image-reference:progress', {
+      phase: 'done', current: createdIndexes.length, total: createdIndexes.length,
+      label: failed ? `分析完成，${failed} 张需要重试` : '所有图片分析完成',
+    })
     return { ok: true, imported: createdIndexes.length, failed, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
 })
@@ -1112,6 +1131,10 @@ ipcMain.handle('image:create-set', async (event, version) => {
       else { tasks.push(task); taskIndex = tasks.length - 1 }
       await saveImageTasks(tasks)
       await saveImageTaskArtifacts(task)
+      event.sender.send('image:progress', {
+        version: draft.version, phase: 'planning', current: 0, total: task.plan.pages.length,
+        label: '套图画布已展开', task,
+      })
     }
 
     const missingPages = task.plan.pages.filter((page) => !task.currentImageIds?.[page.id])
@@ -1119,10 +1142,12 @@ ipcMain.handle('image:create-set', async (event, version) => {
       const page = missingPages[index]
       event.sender.send('image:progress', {
         version: draft.version,
+        pageId: page.id,
         phase: 'generating',
         current: index + 1,
         total: missingPages.length,
         label: `正在生成${page.label}`,
+        task,
       })
       const image = await generateImagePage(project, task, page, page.brief)
       task.images = [...task.images, image]
@@ -1133,29 +1158,52 @@ ipcMain.handle('image:create-set', async (event, version) => {
       tasks[taskIndex] = task
       await saveImageTasks(tasks)
       await saveImageTaskArtifacts(task)
+      event.sender.send('image:progress', {
+        version: draft.version, pageId: page.id, phase: 'page-done',
+        current: index + 1, total: missingPages.length, label: `${page.label}已完成`, task,
+      })
     }
-    event.sender.send('image:progress', { version: draft.version, phase: 'done', current: task.plan.pages.length, total: task.plan.pages.length, label: '整套配图已生成' })
+    event.sender.send('image:progress', { version: draft.version, phase: 'done', current: task.plan.pages.length, total: task.plan.pages.length, label: '整套配图已生成', task })
     return { ok: true, data: await loadProject() }
   } catch (error) {
     return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined }
   }
 })
 
+function findImageTaskContext(project, taskId) {
+  const normalizedId = String(taskId)
+  const currentIndex = project?.imageTasks.findIndex((item) => item.id === normalizedId) ?? -1
+  if (currentIndex >= 0) return { task: normalizeImageTask(project.imageTasks[currentIndex]), taskIndex: currentIndex, recordIndex: -1, record: null }
+  for (let recordIndex = 0; recordIndex < (project?.generationHistory || []).length; recordIndex += 1) {
+    const record = project.generationHistory[recordIndex]
+    const taskIndex = (record.imageTasks || []).findIndex((item) => item.id === normalizedId)
+    if (taskIndex >= 0) return { task: normalizeImageTask(record.imageTasks[taskIndex]), taskIndex, recordIndex, record }
+  }
+  return null
+}
+
 ipcMain.handle('image:regenerate-page', async (event, taskId, pageId, feedback) => {
   try {
     const project = await loadProject()
-    const index = project?.imageTasks.findIndex((item) => item.id === String(taskId)) ?? -1
-    if (index < 0) throw new Error('没有找到这套配图')
-    const tasks = [...project.imageTasks]
-    const task = normalizeImageTask(tasks[index])
+    const located = findImageTaskContext(project, taskId)
+    if (!located) throw new Error('没有找到这套配图')
+    const tasks = located.record ? [...(located.record.imageTasks || [])] : [...project.imageTasks]
+    const task = located.task
+    const generationProject = located.record ? {
+      ...project,
+      facts: located.record.facts || project.facts,
+      strategies: located.record.strategies,
+      rules: located.record.rules || project.rules,
+      drafts: located.record.drafts,
+    } : project
     const pageIndex = task.plan.pages.findIndex((item) => item.id === String(pageId))
     if (pageIndex < 0) throw new Error('没有找到要重新生成的页面')
     const page = task.plan.pages[pageIndex]
 
-    event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'rewriting', current: 0, total: 1, label: `正在重写${page.label}提示词` })
-    const rewrittenBrief = await rewriteImagePage(project, task, page, feedback)
-    event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'generating', current: 1, total: 1, label: `正在重新生成${page.label}` })
-    const image = await generateImagePage(project, task, page, rewrittenBrief, feedback)
+    event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'rewriting', current: 0, total: 1, label: `正在重写${page.label}提示词`, task })
+    const rewrittenBrief = await rewriteImagePage(generationProject, task, page, feedback)
+    event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'generating', current: 1, total: 1, label: `正在重新生成${page.label}`, task })
+    const image = await generateImagePage(generationProject, task, page, rewrittenBrief, feedback)
 
     const rewrittenPage = { ...page, title: rewrittenBrief.coverTitle, purpose: rewrittenBrief.purpose, brief: rewrittenBrief }
     task.plan = { ...task.plan, pages: task.plan.pages.map((item, itemIndex) => itemIndex === pageIndex ? rewrittenPage : item) }
@@ -1165,10 +1213,14 @@ ipcMain.handle('image:regenerate-page', async (event, taskId, pageId, feedback) 
     task.prompt = image.prompt
     task.negativePrompt = image.negativePrompt
     task.updatedAt = now()
-    tasks[index] = task
-    await saveImageTasks(tasks)
+    tasks[located.taskIndex] = task
+    if (located.record) {
+      const history = [...project.generationHistory]
+      history[located.recordIndex] = { ...located.record, imageTasks: tasks }
+      await writeJson(outputPath('生成记录.json'), history)
+    } else await saveImageTasks(tasks)
     await saveImageTaskArtifacts(task)
-    event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'done', current: 1, total: 1, label: `${page.label}已更新` })
+    event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'done', current: 1, total: 1, label: `${page.label}已更新`, task })
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
 })
@@ -1186,13 +1238,14 @@ ipcMain.handle('image:read', async (_event, relativePath) => {
 ipcMain.handle('image:export', async (_event, taskId, imageId) => {
   try {
     const project = await loadProject()
-    const task = project?.imageTasks.find((item) => item.id === String(taskId))
+    const located = findImageTaskContext(project, taskId)
+    const task = located?.task
     const image = task?.images.find((item) => item.id === String(imageId))
     if (!task || !image) throw new Error('没有找到要导出的图片')
-    const draft = project.drafts.find((item) => item.version === task.draftVersion)
+    const draft = (located?.record?.drafts || project.drafts).find((item) => item.version === task.draftVersion)
     const safeTitle = String(draft?.title || '小红书封面').replace(/[\\/:*?"<>|]/g, '-').slice(0, 40)
     const result = await dialog.showSaveDialog({
-      title: '导出小红书封面',
+      title: '导出小红书图片',
       defaultPath: `${safeTitle}.png`,
       filters: [{ name: 'PNG 图片', extensions: ['png'] }],
     })
@@ -1205,7 +1258,8 @@ ipcMain.handle('image:export', async (_event, taskId, imageId) => {
 ipcMain.handle('image:export-set', async (_event, taskId) => {
   try {
     const project = await loadProject()
-    const task = project?.imageTasks.find((item) => item.id === String(taskId))
+    const located = findImageTaskContext(project, taskId)
+    const task = located?.task
     if (!task) throw new Error('没有找到要导出的套图')
     const currentImages = task.plan.pages.map((page) => ({
       page,
@@ -1218,7 +1272,7 @@ ipcMain.handle('image:export-set', async (_event, taskId) => {
       properties: ['openDirectory', 'createDirectory'],
     })
     if (result.canceled || !result.filePaths[0]) return { ok: true }
-    const draft = project.drafts.find((item) => item.version === task.draftVersion)
+    const draft = (located?.record?.drafts || project.drafts).find((item) => item.version === task.draftVersion)
     const safeTitle = String(draft?.title || '小红书配图').replace(/[\\/:*?"<>|]/g, '-').slice(0, 36)
     let target = path.join(result.filePaths[0], `${safeTitle}-整套配图`)
     if (await exists(target)) target = path.join(result.filePaths[0], `${safeTitle}-整套配图-${Date.now()}`)
