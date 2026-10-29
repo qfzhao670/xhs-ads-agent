@@ -13,8 +13,8 @@ const DEFAULT_IMAGE_SETTINGS = {
   apiKey: '',
   model: 'qwen-image-3.0-pro',
   size: '1080x1440',
-  count: 3,
-  promptExtendMode: 'agent',
+  count: 1,
+  promptExtendMode: 'direct',
   enableThinking: true,
   watermark: false,
 }
@@ -30,8 +30,11 @@ function list(value, limit = 6) {
 
 function sanitizeImageBrief(value = {}, fallbackTitle = '') {
   const style = STYLE_DESCRIPTIONS[value.style] ? value.style : 'lifestyle'
+  const pageRole = ['cover', 'content', 'summary'].includes(value.pageRole) ? value.pageRole : 'cover'
   return {
-    purpose: text(value.purpose, '小红书图文笔记首图'),
+    purpose: text(value.purpose, pageRole === 'cover' ? '小红书图文笔记首图' : '小红书图文笔记内容页'),
+    pageRole,
+    pageLabel: text(value.pageLabel, pageRole === 'cover' ? '封面' : pageRole === 'summary' ? '收束页' : '内容页'),
     coverTitle: text(value.coverTitle, fallbackTitle).slice(0, 30),
     subtitle: text(value.subtitle).slice(0, 40),
     style,
@@ -42,11 +45,39 @@ function sanitizeImageBrief(value = {}, fallbackTitle = '') {
     mood: text(value.mood, '真实、轻松、可信、有分享感'),
     mustShow: list(value.mustShow),
     mustAvoid: list(value.mustAvoid),
+    visualContinuity: text(value.visualContinuity),
     extraNotes: text(value.extraNotes),
   }
 }
 
-function buildXhsImagePrompt(rawBrief) {
+function sanitizeImageReferenceTags(value = {}) {
+  return {
+    summary: text(value.summary, '待补充图片描述').slice(0, 240),
+    useCases: list(value.useCases, 6),
+    visualStyle: text(value.visualStyle).slice(0, 160),
+    composition: text(value.composition).slice(0, 200),
+    textLayout: text(value.textLayout).slice(0, 160),
+    colorPalette: list(value.colorPalette, 6),
+    keyElements: list(value.keyElements, 8),
+    keywords: list(value.keywords, 10),
+    avoidCopying: list(value.avoidCopying, 8),
+  }
+}
+
+function buildReferenceUsePrompt(references = []) {
+  if (!references.length) throw new Error('图生图必须至少提供一张参考图片')
+  const descriptions = references.map((reference, index) => {
+    const tags = sanitizeImageReferenceTags(reference.tags)
+    return `图${index + 1}（${reference.isCover ? '封面样本' : '内容页样本'}，${reference.id || '未编号'}）：${tags.summary}；可借鉴：${[tags.visualStyle, tags.composition, tags.textLayout].filter(Boolean).join('；') || '整体视觉表达'}`
+  }).join('\n')
+  return `【参考图使用规则】
+输入的图1至图${references.length}均为第三方小红书视觉样本，只是 few-shot 设计参考，不是本篇内容素材。
+只能借鉴它们的版式结构、构图方法、配色关系、字体气质、留白、材质与视觉节奏；严禁照搬其中的人物身份、商品、品牌、Logo、文字、地点、价格、数据、活动权益或任何业务事实。
+输出图必须以本篇提供的真实事实、标题和画面要求为唯一内容依据。若参考图内容与本篇事实冲突，必须完全舍弃参考图内容。
+${descriptions}`
+}
+
+function buildXhsImagePrompt(rawBrief, references = []) {
   const brief = sanitizeImageBrief(rawBrief)
   const style = STYLE_DESCRIPTIONS[brief.style]
   const exactText = [
@@ -56,9 +87,12 @@ function buildXhsImagePrompt(rawBrief) {
   const palette = brief.palette.length ? brief.palette.join('、') : '自然协调、明亮但不过度饱和的配色'
   const mustShow = brief.mustShow.length ? brief.mustShow.join('、') : '清晰的核心主体'
   const mustAvoid = [...new Set([...brief.mustAvoid, '虚构奖项或认证', '随机品牌 Logo'])].join('、')
+  const isCover = brief.pageRole === 'cover'
+  const pageKind = isCover ? '首图封面' : brief.pageRole === 'summary' ? '结尾收束页' : '内容信息页'
 
-  return `【任务】
-生成一张适合小红书${brief.purpose}的 3:4 竖版宣传封面。画面需要有传播吸引力，但应像真实、有品质的内容分享，不要做成传统电商促销海报。
+  const referenceRules = references.length ? `${buildReferenceUsePrompt(references)}\n\n` : ''
+  return `${referenceRules}【任务】
+生成一张适合小红书图文笔记的 3:4 竖版${pageKind}。本页用途：${brief.purpose}。它属于一套连续配图，需要承担独立的信息职责，不能重复封面内容。画面应像真实、有品质的内容分享，不要做成传统电商促销海报。
 
 【画面主体】
 ${brief.subject}
@@ -69,7 +103,7 @@ ${brief.scene}
 整体氛围：${brief.mood}。
 
 【版式构图】
-3:4 竖版，小红书首图构图。${brief.composition}。标题不得遮挡人物面部或产品主体，四周保留约 8% 安全边距，缩略图状态下主体和标题仍然清晰。
+3:4 竖版，小红书${pageKind}构图。${brief.composition}。标题不得遮挡人物面部或产品主体，四周保留约 8% 安全边距，${isCover ? '缩略图状态下主体和标题仍然清晰' : '翻页阅读时信息层级清楚、重点一眼可扫读'}。
 
 【需要准确呈现的文字】
 画面中只允许出现以下简体中文：
@@ -78,6 +112,7 @@ ${exactText}
 
 【视觉风格】
 ${style}。主辅色：${palette}。有自然光和真实材质，画面精致、有点击吸引力，同时保留真实分享感。
+${brief.visualContinuity ? `套图统一规范：${brief.visualContinuity}。必须沿用统一的色彩、字体气质、边距和视觉符号，但本页构图不得照搬其他页面。` : ''}
 
 【必须呈现】
 ${mustShow}。
@@ -102,7 +137,6 @@ function buildNegativePrompt(rawBrief) {
 }
 
 function normalizeImageSettings(value = {}) {
-  const count = Number.parseInt(value.count, 10)
   return {
     enabled: Boolean(value.enabled),
     protocol: value.protocol === 'openai' ? 'openai' : 'dashscope',
@@ -110,8 +144,10 @@ function normalizeImageSettings(value = {}) {
     apiKey: text(value.apiKey),
     model: text(value.model, DEFAULT_IMAGE_SETTINGS.model),
     size: /^\d+x\d+$/.test(text(value.size)) ? text(value.size) : DEFAULT_IMAGE_SETTINGS.size,
-    count: Number.isInteger(count) ? Math.min(6, Math.max(1, count)) : DEFAULT_IMAGE_SETTINGS.count,
-    promptExtendMode: value.promptExtendMode === 'direct' ? 'direct' : 'agent',
+    // 套图中的每一页都有独立提示词。单次接口调用固定只生成一张，避免产生近似候选图。
+    count: 1,
+    // Qwen Image I2I 不支持 agent 提示词增强，图生图链路固定使用 direct。
+    promptExtendMode: 'direct',
     enableThinking: value.enableThinking !== false,
     watermark: Boolean(value.watermark),
   }
@@ -140,11 +176,14 @@ function resolveImageEndpoint(baseUrl, requestedProtocol) {
   return `${origin}/api/v1/services/aigc/multimodal-generation/generation`
 }
 
-function buildImageApiRequest(settings, prompt, negativePrompt, seed) {
+function buildImageApiRequest(settings, prompt, negativePrompt, seed, referenceImages = []) {
+  if (!Array.isArray(referenceImages) || !referenceImages.length) throw new Error('图生图请求缺少参考图片')
+  const maximum = /^qwen-image-2\.1/i.test(settings.model) ? 10 : 3
+  const images = referenceImages.slice(0, maximum)
   const protocol = settings.protocol === 'openai' ? 'openai' : 'dashscope'
   const common = {
     prompt_extend: true,
-    prompt_extend_mode: settings.promptExtendMode,
+    prompt_extend_mode: 'direct',
     enable_thinking: settings.enableThinking,
     negative_prompt: negativePrompt,
     seed,
@@ -154,7 +193,7 @@ function buildImageApiRequest(settings, prompt, negativePrompt, seed) {
     return {
       protocol,
       endpoint: resolveImageEndpoint(settings.baseUrl, protocol),
-      body: { model: settings.model, prompt, size: settings.size, n: settings.count, ...common },
+      body: { model: settings.model, prompt, image: images.length === 1 ? images[0] : images, size: settings.size, n: 1, ...common },
     }
   }
   return {
@@ -162,8 +201,8 @@ function buildImageApiRequest(settings, prompt, negativePrompt, seed) {
     endpoint: resolveImageEndpoint(settings.baseUrl, protocol),
     body: {
       model: settings.model,
-      input: { messages: [{ role: 'user', content: [{ text: prompt }] }] },
-      parameters: { ...common, n: settings.count, size: settings.size.replace('x', '*') },
+      input: { messages: [{ role: 'user', content: [...images.map((image) => ({ image })), { text: prompt }] }] },
+      parameters: { ...common, n: 1, size: settings.size.replace('x', '*') },
     },
   }
 }
@@ -213,6 +252,7 @@ module.exports = {
   STYLE_DESCRIPTIONS,
   buildImageApiRequest,
   buildNegativePrompt,
+  buildReferenceUsePrompt,
   buildXhsImagePrompt,
   detectImageProtocol,
   formatImageApiError,
@@ -220,4 +260,5 @@ module.exports = {
   parseImageApiResponse,
   resolveImageEndpoint,
   sanitizeImageBrief,
+  sanitizeImageReferenceTags,
 }

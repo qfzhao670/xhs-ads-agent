@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain } = require('electron')
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage } = require('electron')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
@@ -20,12 +20,15 @@ const {
   normalizeImageSettings,
   parseImageApiResponse,
   sanitizeImageBrief,
+  sanitizeImageReferenceTags,
 } = require('./image-utils.cjs')
 
 const MARKER = '小红书运营工坊.json'
 const DATA_DIR = '项目数据'
 const OUTPUT_DIR = '生成结果'
 const IMAGE_TASKS_FILE = '配图记录.json'
+const IMAGE_REFERENCES_FILE = '小红书图片参考库.json'
+const IMAGE_REFERENCES_DIR = '小红书图片参考库'
 let currentRoot = ''
 
 const assetFiles = {
@@ -60,6 +63,20 @@ function applicationIconPath() {
     : path.join(__dirname, '..', 'build', 'icon.png')
 }
 
+function normalizeImageReference(value = {}) {
+  return {
+    ...value,
+    id: String(value.id || ''),
+    originalName: String(value.originalName || ''),
+    relativePath: String(value.relativePath || ''),
+    isCover: Boolean(value.isCover),
+    enabled: value.enabled !== false,
+    taggingStatus: ['ready', 'failed', 'pending'].includes(value.taggingStatus) ? value.taggingStatus : value.tags ? 'ready' : 'pending',
+    taggingError: String(value.taggingError || ''),
+    tags: sanitizeImageReferenceTags(value.tags),
+  }
+}
+
 async function loadProject() {
   if (!currentRoot) return null
   const meta = await readMeta()
@@ -69,12 +86,16 @@ async function loadProject() {
   const keywords = (await readJson(dataPath(assetFiles.keywords), [])).map((item) => normalizeAsset('keywords', item))
   const references = (await readJson(dataPath(assetFiles.references), [])).map((item) => normalizeAsset('references', item))
   const rules = (await readJson(dataPath(assetFiles.rules), [])).map((item) => normalizeAsset('rules', item))
+  const imageReferences = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
   const facts = await readJson(outputPath('业务事实.json'), null)
   const strategies = await readJson(outputPath('策略候选.json'), [])
   const selection = await readJson(outputPath('策略选择.json'), { selectedStrategyIds: [], selectedStrategyId: '', strategyAdvice: {}, advice: '' })
   const drafts = await readJson(outputPath('终稿版本.json'), [])
-  const imageTasks = await readJson(outputPath(IMAGE_TASKS_FILE), [])
-  const generationHistory = await readJson(outputPath('生成记录.json'), [])
+  const imageTasks = (await readJson(outputPath(IMAGE_TASKS_FILE), [])).map(normalizeImageTask)
+  const generationHistory = (await readJson(outputPath('生成记录.json'), [])).map((record) => ({
+    ...record,
+    imageTasks: Array.isArray(record.imageTasks) ? record.imageTasks.map(normalizeImageTask) : [],
+  }))
   const currentGeneration = await readJson(outputPath('当前生成.json'), { id: 'GEN-0001', createdAt: meta.createdAt })
   return {
     meta: { name: meta.name, root: currentRoot, createdAt: meta.createdAt, updatedAt: meta.updatedAt },
@@ -83,7 +104,7 @@ async function loadProject() {
       name: materialExists ? '业务原始素材.md' : '',
       content: materialExists ? await fsp.readFile(materialFile, 'utf8') : '',
     },
-    keywords, references, rules, facts, strategies,
+    keywords, references, rules, imageReferences, facts, strategies,
     selectedStrategyIds: Array.isArray(selection.selectedStrategyIds)
       ? selection.selectedStrategyIds
       : selection.selectedStrategyId ? [selection.selectedStrategyId] : [],
@@ -108,6 +129,7 @@ async function userConfig() {
       baseUrl: String(stored.baseUrl || 'https://api.openai.com/v1'),
       apiKey: String(stored.apiKey || ''),
       model: String(stored.model || ''),
+      visionModel: String(stored.visionModel || stored.model || ''),
       image: normalizeImageSettings({ ...DEFAULT_IMAGE_SETTINGS, ...(stored.image || {}) }),
     },
   }
@@ -214,15 +236,74 @@ async function callModel(system, user, onChunk = () => {}, thinking = false) {
   return parseModelJson(fullText)
 }
 
-async function callImageModel(brief) {
+function imageMime(file) {
+  const extension = path.extname(file).toLowerCase()
+  return extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg'
+    : extension === '.webp' ? 'image/webp'
+      : extension === '.gif' ? 'image/gif'
+        : extension === '.bmp' ? 'image/bmp'
+          : extension === '.tif' || extension === '.tiff' ? 'image/tiff'
+            : 'image/png'
+}
+
+async function imageDataUrl(file) {
+  const buffer = await fsp.readFile(file)
+  if (!buffer.length) throw new Error('参考图片文件为空')
+  if (buffer.length > 10 * 1024 * 1024) throw new Error('参考图片超过 10MB，无法发送给模型')
+  return `data:${imageMime(file)};base64,${buffer.toString('base64')}`
+}
+
+async function callVisionTagger(reference) {
+  const { value } = await userConfig()
+  if (!value.apiKey || !value.visionModel || !value.baseUrl) throw new Error('请先在“模型设置”中配置支持图片理解的视觉打标模型')
+  let endpoint = value.baseUrl.replace(/\/+$/, '')
+  if (!endpoint.endsWith('/chat/completions')) endpoint += '/chat/completions'
+  const source = await imageDataUrl(resolveProjectFile(reference.relativePath))
+  const role = reference.isCover ? '小红书封面（首图）' : '小红书内容页'
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 120_000)
+  let response
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${value.apiKey}` },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: value.visionModel,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: '你是小红书视觉样本分析器。只输出合法 JSON。你的任务是描述可复用的视觉方法，不得把样本中的人物、品牌或业务信息当作未来内容事实。' },
+          { role: 'user', content: [
+            { type: 'text', text: `这张图片由用户标注为“${role}”。请分析它适合被哪些小红书选题和页面职责参考，以及可复用的视觉结构。不要评价业务真实性，不要抄录长段原文。输出：{"summary":"一句话描述这幅图适合参考的场景","useCases":["适用场景"],"visualStyle":"视觉风格与质感","composition":"构图和视觉动线","textLayout":"标题与信息排版方式","colorPalette":["主要颜色"],"keyElements":["关键视觉元素"],"keywords":["检索关键词"],"avoidCopying":["不能照搬的具体内容"]}` },
+            { type: 'image_url', image_url: { url: source } },
+          ] },
+        ],
+      }),
+    })
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('视觉打标超过 2 分钟，请检查模型是否支持图片理解后重试')
+    throw new Error(`无法连接视觉打标模型：${error.message}`)
+  } finally { clearTimeout(timeout) }
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`视觉打标模型返回 ${response.status}：${body.slice(0, 400)}`)
+  }
+  return sanitizeImageReferenceTags(parseModelJson(responseText(await response.json())))
+}
+
+async function callImageModel(brief, references) {
   const { value } = await userConfig()
   const settings = value.image
   if (!settings.enabled) throw new Error('请先在“设置 → 图片模型”中启用图片生成功能')
   if (!settings.apiKey || !settings.model || !settings.baseUrl) throw new Error('请完整填写图片模型的接口地址、API Key 和模型名称')
-  const prompt = buildXhsImagePrompt(brief)
+  if (!Array.isArray(references) || !references.length) throw new Error('没有可用的参考图片。请先到“素材管理 → 小红书图片”上传并完成打标')
+  const usableReferences = references.slice(0, /^qwen-image-2\.1/i.test(settings.model) ? 10 : 3)
+  const prompt = buildXhsImagePrompt(brief, usableReferences)
   const negativePrompt = buildNegativePrompt(brief)
   const seed = crypto.randomInt(0, 2147483647)
-  const request = buildImageApiRequest(settings, prompt, negativePrompt, seed)
+  const referenceImages = await Promise.all(usableReferences.map((reference) => imageDataUrl(resolveProjectFile(reference.relativePath))))
+  const request = buildImageApiRequest(settings, prompt, negativePrompt, seed, referenceImages)
   if (!request.endpoint) throw new Error('图片模型接口地址不是有效的 HTTP(S) URL')
   const requestHost = new URL(request.endpoint).hostname
   if (request.protocol === 'openai' && ['dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com'].includes(requestHost)) {
@@ -256,6 +337,7 @@ async function callImageModel(brief) {
     seed,
     requestId: parsed.requestId || response.headers.get('x-request-id') || '',
     usage: parsed.usage,
+    referenceImageIds: usableReferences.map((reference) => reference.id),
     settings: { model: settings.model, size: settings.size, count: settings.count },
   }
 }
@@ -289,8 +371,14 @@ async function saveImageTasks(tasks) { await writeJson(outputPath(IMAGE_TASKS_FI
 async function saveImageTaskArtifacts(task) {
   const folder = resolveProjectFile(task.artifactDir)
   await fsp.mkdir(folder, { recursive: true })
-  await writeJson(path.join(folder, 'brief.json'), task.brief)
-  await fsp.writeFile(path.join(folder, 'prompt.txt'), `${task.prompt || ''}\n`, 'utf8')
+  if (task.plan) await writeJson(path.join(folder, 'plan.json'), task.plan)
+  if (task.brief) await writeJson(path.join(folder, 'brief.json'), task.brief)
+  const currentPrompts = task.plan?.pages?.map((page) => {
+    const imageId = task.currentImageIds?.[page.id]
+    const image = task.images?.find((item) => item.id === imageId)
+    return `# ${page.label || page.id}\n\n${image?.prompt || ''}`
+  }).join('\n\n') || task.prompt || ''
+  await fsp.writeFile(path.join(folder, 'prompt.txt'), `${currentPrompts}\n`, 'utf8')
   await fsp.writeFile(path.join(folder, 'negative-prompt.txt'), `${task.negativePrompt || ''}\n`, 'utf8')
   await writeJson(path.join(folder, 'metadata.json'), {
     id: task.id,
@@ -298,9 +386,164 @@ async function saveImageTaskArtifacts(task) {
     strategyId: task.strategyId,
     draftVersion: task.draftVersion,
     selectedImageId: task.selectedImageId,
+    currentImageIds: task.currentImageIds || {},
     images: task.images,
+    referenceImageIds: [...new Set(task.plan?.pages?.flatMap((page) => page.referenceImageIds || []) || [])],
     updatedAt: task.updatedAt,
   })
+}
+
+function normalizeImageTask(value = {}) {
+  const images = Array.isArray(value.images) ? value.images : []
+  if (Array.isArray(value.plan?.pages) && value.plan.pages.length) {
+    const pages = value.plan.pages.map((page, index) => {
+      const role = index === 0 ? 'cover' : page.role === 'summary' ? 'summary' : 'content'
+      const id = String(page.id || `PAGE-${String(index + 1).padStart(2, '0')}`)
+      return {
+        ...page,
+        id,
+        role,
+        label: String(page.label || (role === 'cover' ? '封面' : role === 'summary' ? '收束页' : `内容页 ${index}`)),
+        referenceImageIds: Array.isArray(page.referenceImageIds) ? page.referenceImageIds.map(String).slice(0, 3) : [],
+        brief: sanitizeImageBrief({ ...(page.brief || page), pageRole: role, pageLabel: page.label, visualContinuity: value.plan.visualContinuity }),
+      }
+    })
+    const normalizedImages = images.map((image) => ({ ...image, pageId: image.pageId || pages[0].id }))
+    const currentImageIds = { ...(value.currentImageIds || {}) }
+    for (const page of pages) {
+      if (!currentImageIds[page.id]) currentImageIds[page.id] = normalizedImages.filter((image) => image.pageId === page.id).at(-1)?.id || ''
+    }
+    return { ...value, plan: { ...value.plan, pages }, images: normalizedImages, currentImageIds }
+  }
+
+  // 兼容旧版“多张候选封面”记录：保留已选封面，并把它迁移成一页套图。
+  const pageId = 'PAGE-01'
+  const brief = sanitizeImageBrief({ ...(value.brief || {}), pageRole: 'cover', pageLabel: '封面' })
+  const normalizedImages = images.map((image) => ({ ...image, pageId: image.pageId || pageId }))
+  const currentId = value.selectedImageId || normalizedImages.at(-1)?.id || ''
+  return {
+    ...value,
+    images: normalizedImages,
+    currentImageIds: { [pageId]: currentId },
+    plan: {
+      version: 2,
+      concept: '旧版封面记录',
+      visualContinuity: brief.visualContinuity || '',
+      pages: [{ id: pageId, role: 'cover', label: '封面', purpose: brief.purpose, title: brief.coverTitle, referenceImageIds: [], brief }],
+    },
+  }
+}
+
+function sanitizeImagePlan(value, draft, imageReferences) {
+  const rawPages = Array.isArray(value?.pages) ? value.pages.slice(0, 6) : []
+  if (rawPages.length < 4) throw new Error('图片策划没有形成完整套图，请重试')
+  const enabledReferences = imageReferences.filter((item) => item.enabled !== false && item.taggingStatus === 'ready')
+  const validIds = new Set(enabledReferences.map((item) => item.id))
+  if (!validIds.size) throw new Error('没有已完成打标的参考图片，请先在素材管理中上传图片')
+  const visualContinuity = String(value.visualContinuity || value.visualSystem || '').trim()
+  const pages = rawPages.map((page, index) => {
+    const role = index === 0 ? 'cover' : index === rawPages.length - 1 && page.role === 'summary' ? 'summary' : 'content'
+    const id = `PAGE-${String(index + 1).padStart(2, '0')}`
+    const label = String(page.label || (role === 'cover' ? '封面' : role === 'summary' ? '收束页' : `内容页 ${index}`)).trim()
+    const brief = sanitizeImageBrief({
+      ...(page.brief || page),
+      pageRole: role,
+      pageLabel: label,
+      purpose: page.purpose,
+      visualContinuity,
+    }, index === 0 ? draft.title : label)
+    const referenceImageIds = [...new Set((Array.isArray(page.referenceImageIds) ? page.referenceImageIds : []).map(String).filter((referenceId) => validIds.has(referenceId)))].slice(0, 3)
+    if (!referenceImageIds.length) throw new Error(`${label}没有选择有效参考图，请重新生成图片策划`)
+    return { id, role, label, purpose: brief.purpose, title: brief.coverTitle, referenceImageIds, brief }
+  })
+  return {
+    version: 2,
+    concept: String(value.concept || '围绕本篇文案形成连贯视觉叙事').trim(),
+    visualContinuity,
+    pages,
+  }
+}
+
+async function createImagePlan(project, draft) {
+  const strategy = project.strategies.find((item) => item.id === draft.strategyId)
+  const rules = project.rules.filter((item) => item.enabled !== false)
+  const enabledImageReferences = project.imageReferences.filter((item) => item.enabled !== false && item.taggingStatus === 'ready')
+  if (!enabledImageReferences.length) throw new Error('请先到“素材管理 → 小红书图片”上传至少一张优秀样本，并等待自动打标完成')
+  const referenceCatalog = enabledImageReferences.map((item) => ({ id: item.id, isCover: item.isCover, tags: item.tags }))
+  const prompt = `请为以下已确认的小红书图文笔记策划一套完整配图，不是同一张封面的多个候选。
+
+要求：
+1. 根据内容选择 4–6 张 3:4 竖图；第 1 张必须是吸引点击的封面，其余每张分别承接正文中的不同信息，不得重复封面。
+2. 整套图形成清楚的翻页叙事：封面点题 → 核心信息/过程/细节/证据 → 总结或行动提示。不要为了凑数量重复同一卖点。
+3. 所有页面保持统一的配色、字体气质、边距和识别元素，但构图与画面主体必须有明显变化。
+4. 用户不会编辑专业参数，因此你要直接做出完整设计判断。每页只保留一个短标题和一个可选副标题，避免密集小字。
+5. 只能使用给出的事实和文案信息，不得虚构人物、地点、行程、价格、权益、资质、奖项或效果。没有真实照片依据时，优先采用编辑设计、信息卡片、物件静物或抽象视觉，不要伪造实拍现场。
+6. style 只能从 lifestyle、event、product、guide、editorial 中选择。palette、mustShow、mustAvoid 是简短字符串数组。
+7. 你必须只根据下方“参考图片文字标签”判断每一页最适合参考哪些样本，并为每页填写 1–3 个 referenceImageIds。封面优先选择 isCover=true，内容页优先选择 isCover=false；相关性比数量重要。
+8. 参考样本只用于借鉴版式、构图、配色、字体气质和视觉节奏。不得把样本中的人物、商品、品牌、文字、地点或业务信息写进页面策划。页面内容只能来自本篇业务事实与文案。
+
+业务事实：${JSON.stringify(project.facts)}
+选定策略：${JSON.stringify(strategy)}
+已确认文案：${JSON.stringify(draft)}
+合规准则：${JSON.stringify(rules)}
+参考图片文字标签：${JSON.stringify(referenceCatalog)}
+
+只输出 JSON 对象：{"concept":"整套图的叙事概念","visualContinuity":"整套图统一的颜色、排版、材质和识别元素","pages":[{"role":"cover","label":"封面","purpose":"本页承担的职责","referenceImageIds":["XHSIMG-0001"],"coverTitle":"短标题","subtitle":"可选短副标题","style":"editorial","subject":"具体画面主体","scene":"场景、动作、光线和道具","composition":"构图与信息层级","palette":["颜色1","颜色2"],"mood":"氛围","mustShow":["必须出现"],"mustAvoid":["不得出现"],"extraNotes":"必要补充"}]}`
+  const result = await callModel(modelSystem, prompt, () => {}, false)
+  return sanitizeImagePlan(result, draft, project.imageReferences)
+}
+
+async function rewriteImagePage(project, task, page, feedback) {
+  const currentImageId = task.currentImageIds?.[page.id]
+  const currentImage = task.images.find((item) => item.id === currentImageId)
+  const request = String(feedback || '').trim()
+  const prompt = `请重写这张小红书配图的视觉策划，然后再交给图片模型生成。必须产生实质变化，不能只是换随机种子。
+
+${request ? `用户改进建议：${request}` : '用户没有填写建议。请主动诊断当前方案，从构图、视觉主体、信息层级或表现手法中选择至少两项进行明显优化，同时保持本页职责和准确文字不变。'}
+
+套图统一规范：${task.plan.visualContinuity}
+本页职责：${page.purpose}
+当前页面策划：${JSON.stringify(page.brief)}
+上次实际图片提示词：${currentImage?.prompt || ''}
+业务事实：${JSON.stringify(project.facts)}
+合规准则：${JSON.stringify(project.rules.filter((item) => item.enabled !== false))}
+
+不得新增未经证实的事实；必须保持与整套图一致，但新构图要能让用户一眼看出变化。只输出与当前页面策划相同字段的 JSON 对象。`
+  const result = await callModel(modelSystem, prompt, () => {}, false)
+  return sanitizeImageBrief({
+    ...result,
+    pageRole: page.role,
+    pageLabel: page.label,
+    purpose: page.purpose,
+    visualContinuity: task.plan.visualContinuity,
+  }, page.title)
+}
+
+async function generateImagePage(project, task, page, brief, feedback = '') {
+  const references = (page.referenceImageIds || []).map((id) => project.imageReferences.find((item) => item.id === id && item.enabled !== false && item.taggingStatus === 'ready')).filter(Boolean)
+  if (!references.length) throw new Error(`${page.label}没有可用参考图，无法执行图生图`)
+  const generated = await callImageModel(brief, references)
+  const url = generated.urls[0]
+  const folder = resolveProjectFile(task.artifactDir)
+  const stamp = Date.now()
+  const revision = task.images.filter((item) => item.pageId === page.id).length + 1
+  const file = path.join(folder, `${page.id.toLowerCase()}-v${String(revision).padStart(2, '0')}-${stamp}.png`)
+  await downloadGeneratedImage(url, file)
+  return {
+    id: `${task.id}-${page.id}-${stamp}`,
+    pageId: page.id,
+    revision,
+    feedback: String(feedback || '').trim(),
+    relativePath: projectRelative(file),
+    createdAt: now(),
+    model: generated.settings.model,
+    size: generated.settings.size,
+    seed: generated.seed,
+    requestId: generated.requestId,
+    prompt: generated.prompt,
+    negativePrompt: generated.negativePrompt,
+    referenceImageIds: generated.referenceImageIds,
+  }
 }
 
 function modelStream(event, operation) {
@@ -320,10 +563,12 @@ async function initializeProject(folder) {
   await fsp.mkdir(path.join(absolute, OUTPUT_DIR), { recursive: true })
   const meta = {
     schemaVersion: 1, name: cleanName(absolute), createdAt: now(), updatedAt: now(),
-    counters: { keywords: 0, references: 0, rules: 0, strategies: 0, generations: 1 },
+    counters: { keywords: 0, references: 0, rules: 0, imageReferences: 0, strategies: 0, generations: 1 },
   }
   await writeJson(path.join(absolute, MARKER), meta)
   for (const file of Object.values(assetFiles)) await writeJson(path.join(absolute, DATA_DIR, file), [])
+  await writeJson(path.join(absolute, DATA_DIR, IMAGE_REFERENCES_FILE), [])
+  await fsp.mkdir(path.join(absolute, DATA_DIR, IMAGE_REFERENCES_DIR), { recursive: true })
   currentRoot = absolute
   await writeJson(outputPath('当前生成.json'), { id: 'GEN-0001', createdAt: now() })
   await writeJson(outputPath('生成记录.json'), [])
@@ -506,6 +751,131 @@ ipcMain.handle('asset:toggle', async (_event, kind, id, enabled) => {
   } catch (error) { return { ok: false, error: error.message } }
 })
 
+async function saveImageReferences(items) {
+  await writeJson(dataPath(IMAGE_REFERENCES_FILE), items.map(normalizeImageReference))
+}
+
+async function retagImageReference(items, index) {
+  const reference = normalizeImageReference(items[index])
+  items[index] = { ...reference, taggingStatus: 'pending', taggingError: '', updatedAt: now() }
+  await saveImageReferences(items)
+  try {
+    const tags = await callVisionTagger(reference)
+    items[index] = { ...items[index], tags, taggingStatus: 'ready', taggingError: '', updatedAt: now() }
+  } catch (error) {
+    items[index] = { ...items[index], taggingStatus: 'failed', taggingError: error.message, updatedAt: now() }
+  }
+  await saveImageReferences(items)
+  return items[index]
+}
+
+ipcMain.handle('image-reference:upload', async (_event, isCover) => {
+  try {
+    if (!currentRoot) throw new Error('请先创建或打开项目')
+    const result = await dialog.showOpenDialog({
+      title: isCover ? '上传优秀的小红书封面样本' : '上传优秀的小红书内容页样本',
+      buttonLabel: '上传并自动打标',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: '图片', extensions: ['jpg', 'jpeg', 'png', 'webp'] }],
+    })
+    if (result.canceled || !result.filePaths.length) return { ok: false, error: '' }
+    if (result.filePaths.length > 12) throw new Error('单次最多上传 12 张图片，请分批上传')
+    const validatedSources = []
+    for (const source of result.filePaths) {
+      const buffer = await fsp.readFile(source)
+      if (!buffer.length) throw new Error(`${path.basename(source)} 是空文件`)
+      if (buffer.length > 10 * 1024 * 1024) throw new Error(`${path.basename(source)} 超过 10MB`)
+      const dimensions = nativeImage.createFromBuffer(buffer).getSize()
+      if (!dimensions.width || !dimensions.height) throw new Error(`${path.basename(source)} 不是可读取的图片`)
+      if (dimensions.width > 8000 || dimensions.height > 8000 || Math.max(dimensions.width, dimensions.height) / Math.min(dimensions.width, dimensions.height) > 10) {
+        throw new Error(`${path.basename(source)} 的尺寸不符合模型要求（边长不超过 8000，长宽比不超过 10:1）`)
+      }
+      validatedSources.push({ source, dimensions })
+    }
+    const items = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
+    const meta = await readMeta()
+    meta.counters = meta.counters || {}
+    const createdIndexes = []
+    for (const { source, dimensions } of validatedSources) {
+      meta.counters.imageReferences = (meta.counters.imageReferences || 0) + 1
+      const id = `XHSIMG-${String(meta.counters.imageReferences).padStart(4, '0')}`
+      const extension = path.extname(source).toLowerCase() || '.png'
+      const target = dataPath(path.join(IMAGE_REFERENCES_DIR, `${id}${extension}`))
+      await fsp.mkdir(path.dirname(target), { recursive: true })
+      await fsp.copyFile(source, target)
+      items.push(normalizeImageReference({
+        id,
+        originalName: path.basename(source),
+        relativePath: projectRelative(target),
+        width: dimensions.width,
+        height: dimensions.height,
+        isCover: Boolean(isCover),
+        enabled: true,
+        taggingStatus: 'pending',
+        tags: {},
+        createdAt: now(),
+        updatedAt: now(),
+      }))
+      createdIndexes.push(items.length - 1)
+    }
+    await writeMeta(meta)
+    await saveImageReferences(items)
+    let failed = 0
+    for (const index of createdIndexes) {
+      const tagged = await retagImageReference(items, index)
+      if (tagged.taggingStatus !== 'ready') failed += 1
+    }
+    return { ok: true, imported: createdIndexes.length, failed, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
+})
+
+ipcMain.handle('image-reference:retag', async (_event, id) => {
+  try {
+    const items = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
+    const index = items.findIndex((item) => item.id === String(id))
+    if (index < 0) throw new Error('没有找到要重新打标的图片')
+    const tagged = await retagImageReference(items, index)
+    if (tagged.taggingStatus !== 'ready') throw new Error(tagged.taggingError || '图片打标失败')
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
+})
+
+ipcMain.handle('image-reference:set-role', async (_event, id, isCover) => {
+  try {
+    const items = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
+    const index = items.findIndex((item) => item.id === String(id))
+    if (index < 0) throw new Error('没有找到要修改的图片')
+    items[index] = { ...items[index], isCover: Boolean(isCover), updatedAt: now() }
+    const tagged = await retagImageReference(items, index)
+    if (tagged.taggingStatus !== 'ready') throw new Error(tagged.taggingError || '图片重新打标失败')
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
+})
+
+ipcMain.handle('image-reference:toggle', async (_event, id, enabled) => {
+  try {
+    const items = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
+    const index = items.findIndex((item) => item.id === String(id))
+    if (index < 0) throw new Error('没有找到要修改的图片')
+    items[index] = { ...items[index], enabled: Boolean(enabled), updatedAt: now() }
+    await saveImageReferences(items)
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('image-reference:delete', async (_event, id) => {
+  try {
+    const items = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
+    const index = items.findIndex((item) => item.id === String(id))
+    if (index < 0) throw new Error('没有找到要删除的图片')
+    const target = resolveProjectFile(items[index].relativePath)
+    if (await exists(target)) await fsp.unlink(target)
+    items.splice(index, 1)
+    await saveImageReferences(items)
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
 ipcMain.handle('settings:get', async () => (await userConfig()).value)
 ipcMain.handle('clipboard:read-text', () => clipboard.readText())
 ipcMain.handle('settings:save', async (_event, settings) => {
@@ -515,6 +885,7 @@ ipcMain.handle('settings:save', async (_event, settings) => {
       baseUrl: String(settings.baseUrl || '').trim(),
       apiKey: String(settings.apiKey || '').trim(),
       model: String(settings.model || '').trim(),
+      visionModel: String(settings.visionModel || settings.model || '').trim(),
       image: normalizeImageSettings(settings.image),
     })
     return { ok: true }
@@ -704,102 +1075,102 @@ ipcMain.handle('workflow:confirm', async (_event, version) => {
   } catch (error) { return { ok: false, error: error.message } }
 })
 
-ipcMain.handle('image:prepare-brief', async (_event, version) => {
+ipcMain.handle('image:create-set', async (event, version) => {
   try {
     const project = await loadProject()
     const draft = project?.drafts.find((item) => item.version === Number(version) && item.confirmed)
-    if (!draft) throw new Error('请先确认这篇文案，再生成图片策划')
-    const strategy = project.strategies.find((item) => item.id === draft.strategyId)
-    const rules = project.rules.filter((item) => item.enabled !== false)
-    const prompt = `请为以下已确认的小红书文案生成一份宣传首图策划。只能使用给出的事实和文案信息，不得虚构产品、人物、地点、权益、价格、资质、奖项或效果。封面标题建议 6–12 个中文字符，最多 16 个；副标题可为空。style 只能从 lifestyle、event、product、guide、editorial 中选择。palette、mustShow、mustAvoid 都是简短字符串数组。\n\n业务事实：${JSON.stringify(project.facts)}\n选定策略：${JSON.stringify(strategy)}\n已确认文案：${JSON.stringify(draft)}\n合规准则：${JSON.stringify(rules)}\n\n输出对象格式：{"purpose":"小红书图文笔记首图","coverTitle":"封面短标题","subtitle":"可选短副标题","style":"lifestyle","subject":"具体画面主体","scene":"具体场景、动作、光线与道具","composition":"主体位置与标题留白位置","palette":["颜色1","颜色2"],"mood":"整体氛围","mustShow":["必须出现的内容"],"mustAvoid":["不得出现的内容"],"extraNotes":"其他必要说明"}`
-    const result = await callModel(modelSystem, prompt, () => {}, false)
-    const brief = sanitizeImageBrief(result, draft.title)
-    const tasks = [...project.imageTasks]
+    if (!draft) throw new Error('请先确认这篇文案，再生成整套配图')
     const taskId = `IMG-${project.currentGeneration.id}-${draft.strategyId}-V${draft.version}`
-    const index = tasks.findIndex((item) => item.id === taskId)
-    const previous = index >= 0 ? tasks[index] : null
-    const artifactDir = projectRelative(path.join(outputPath('配图'), project.currentGeneration.id, `${draft.strategyId}_v${draft.version}`))
-    const task = {
-      id: taskId,
-      generationId: project.currentGeneration.id,
-      strategyId: draft.strategyId,
-      draftVersion: draft.version,
-      brief,
-      prompt: previous?.prompt || '',
-      negativePrompt: previous?.negativePrompt || '',
-      artifactDir,
-      images: previous?.images || [],
-      selectedImageId: previous?.selectedImageId || '',
-      createdAt: previous?.createdAt || now(),
-      updatedAt: now(),
-    }
-    if (index >= 0) tasks[index] = task
-    else tasks.push(task)
-    await saveImageTasks(tasks)
-    await saveImageTaskArtifacts(task)
-    return { ok: true, data: await loadProject() }
-  } catch (error) { return { ok: false, error: error.message } }
-})
-
-ipcMain.handle('image:generate', async (_event, version, rawBrief) => {
-  try {
-    const project = await loadProject()
-    const draft = project?.drafts.find((item) => item.version === Number(version) && item.confirmed)
-    if (!draft) throw new Error('请先确认这篇文案，再生成宣传图片')
-    const taskIndex = project.imageTasks.findIndex((item) => item.draftVersion === draft.version && item.strategyId === draft.strategyId)
-    if (taskIndex < 0) throw new Error('请先生成图片策划')
-    const brief = sanitizeImageBrief(rawBrief, draft.title)
-    if (!brief.coverTitle) throw new Error('封面标题不能为空')
-    const generated = await callImageModel(brief)
-    const task = { ...project.imageTasks[taskIndex] }
-    const batchId = Date.now()
-    const folder = resolveProjectFile(task.artifactDir)
-    const candidates = generated.urls.map((url, index) => {
-      const id = `${task.id}-${batchId}-${index + 1}`
-      const file = path.join(folder, `candidate-${batchId}-${String(index + 1).padStart(2, '0')}.png`)
-      return { id, sourceUrl: url, file, index }
-    })
-    await Promise.all(candidates.map((item) => downloadGeneratedImage(item.sourceUrl, item.file)))
-    const createdAt = now()
-    const images = candidates.map((item) => ({
-      id: item.id,
-      relativePath: projectRelative(item.file),
-      createdAt,
-      model: generated.settings.model,
-      size: generated.settings.size,
-      seed: generated.seed,
-      requestId: generated.requestId,
-      prompt: generated.prompt,
-      negativePrompt: generated.negativePrompt,
-    }))
-    task.brief = brief
-    task.prompt = generated.prompt
-    task.negativePrompt = generated.negativePrompt
-    task.images = [...(task.images || []), ...images]
-    task.updatedAt = createdAt
     const tasks = [...project.imageTasks]
-    tasks[taskIndex] = task
-    await saveImageTasks(tasks)
-    await saveImageTaskArtifacts(task)
+    let taskIndex = tasks.findIndex((item) => item.id === taskId)
+    let task = taskIndex >= 0 ? normalizeImageTask(tasks[taskIndex]) : null
+    const usableReferenceIds = new Set(project.imageReferences.filter((item) => item.enabled !== false && item.taggingStatus === 'ready').map((item) => item.id))
+    const planNeedsReferences = !task?.plan?.pages?.every((page) => page.referenceImageIds?.some((id) => usableReferenceIds.has(id)))
+
+    if (!task || task.plan.pages.length < 4 || planNeedsReferences) {
+      event.sender.send('image:progress', { version: draft.version, phase: 'planning', current: 0, total: 0, label: '正在规划整套图片' })
+      const plan = await createImagePlan(project, draft)
+      const artifactDir = projectRelative(path.join(outputPath('配图'), project.currentGeneration.id, `${draft.strategyId}_v${draft.version}`))
+      task = {
+        id: taskId,
+        generationId: project.currentGeneration.id,
+        strategyId: draft.strategyId,
+        draftVersion: draft.version,
+        plan,
+        brief: plan.pages[0].brief,
+        prompt: '',
+        negativePrompt: '',
+        artifactDir,
+        images: task?.images || [],
+        // 旧版只有候选封面；升级为套图时保留历史文件，但整套页面全部重新生成。
+        currentImageIds: {},
+        selectedImageId: '',
+        createdAt: task?.createdAt || now(),
+        updatedAt: now(),
+      }
+      if (taskIndex >= 0) tasks[taskIndex] = task
+      else { tasks.push(task); taskIndex = tasks.length - 1 }
+      await saveImageTasks(tasks)
+      await saveImageTaskArtifacts(task)
+    }
+
+    const missingPages = task.plan.pages.filter((page) => !task.currentImageIds?.[page.id])
+    for (let index = 0; index < missingPages.length; index += 1) {
+      const page = missingPages[index]
+      event.sender.send('image:progress', {
+        version: draft.version,
+        phase: 'generating',
+        current: index + 1,
+        total: missingPages.length,
+        label: `正在生成${page.label}`,
+      })
+      const image = await generateImagePage(project, task, page, page.brief)
+      task.images = [...task.images, image]
+      task.currentImageIds = { ...task.currentImageIds, [page.id]: image.id }
+      task.prompt = image.prompt
+      task.negativePrompt = image.negativePrompt
+      task.updatedAt = now()
+      tasks[taskIndex] = task
+      await saveImageTasks(tasks)
+      await saveImageTaskArtifacts(task)
+    }
+    event.sender.send('image:progress', { version: draft.version, phase: 'done', current: task.plan.pages.length, total: task.plan.pages.length, label: '整套配图已生成' })
     return { ok: true, data: await loadProject() }
-  } catch (error) { return { ok: false, error: error.message } }
+  } catch (error) {
+    return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined }
+  }
 })
 
-ipcMain.handle('image:select', async (_event, taskId, imageId) => {
+ipcMain.handle('image:regenerate-page', async (event, taskId, pageId, feedback) => {
   try {
     const project = await loadProject()
     const index = project?.imageTasks.findIndex((item) => item.id === String(taskId)) ?? -1
-    if (index < 0) throw new Error('没有找到配图任务')
-    const task = { ...project.imageTasks[index] }
-    if (!task.images.some((item) => item.id === String(imageId))) throw new Error('没有找到要选择的图片')
-    task.selectedImageId = String(imageId)
-    task.updatedAt = now()
+    if (index < 0) throw new Error('没有找到这套配图')
     const tasks = [...project.imageTasks]
+    const task = normalizeImageTask(tasks[index])
+    const pageIndex = task.plan.pages.findIndex((item) => item.id === String(pageId))
+    if (pageIndex < 0) throw new Error('没有找到要重新生成的页面')
+    const page = task.plan.pages[pageIndex]
+
+    event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'rewriting', current: 0, total: 1, label: `正在重写${page.label}提示词` })
+    const rewrittenBrief = await rewriteImagePage(project, task, page, feedback)
+    event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'generating', current: 1, total: 1, label: `正在重新生成${page.label}` })
+    const image = await generateImagePage(project, task, page, rewrittenBrief, feedback)
+
+    const rewrittenPage = { ...page, title: rewrittenBrief.coverTitle, purpose: rewrittenBrief.purpose, brief: rewrittenBrief }
+    task.plan = { ...task.plan, pages: task.plan.pages.map((item, itemIndex) => itemIndex === pageIndex ? rewrittenPage : item) }
+    task.images = [...task.images, image]
+    task.currentImageIds = { ...task.currentImageIds, [page.id]: image.id }
+    task.brief = task.plan.pages[0].brief
+    task.prompt = image.prompt
+    task.negativePrompt = image.negativePrompt
+    task.updatedAt = now()
     tasks[index] = task
     await saveImageTasks(tasks)
     await saveImageTaskArtifacts(task)
+    event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'done', current: 1, total: 1, label: `${page.label}已更新` })
     return { ok: true, data: await loadProject() }
-  } catch (error) { return { ok: false, error: error.message } }
+  } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
 })
 
 ipcMain.handle('image:read', async (_event, relativePath) => {
@@ -828,6 +1199,36 @@ ipcMain.handle('image:export', async (_event, taskId, imageId) => {
     if (result.canceled || !result.filePath) return { ok: true }
     await fsp.copyFile(resolveProjectFile(image.relativePath), result.filePath)
     return { ok: true, savedPath: result.filePath }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('image:export-set', async (_event, taskId) => {
+  try {
+    const project = await loadProject()
+    const task = project?.imageTasks.find((item) => item.id === String(taskId))
+    if (!task) throw new Error('没有找到要导出的套图')
+    const currentImages = task.plan.pages.map((page) => ({
+      page,
+      image: task.images.find((item) => item.id === task.currentImageIds?.[page.id]),
+    })).filter((item) => item.image)
+    if (!currentImages.length) throw new Error('这套配图还没有可导出的图片')
+    const result = await dialog.showOpenDialog({
+      title: '选择整套图片的导出位置',
+      buttonLabel: '导出到这里',
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (result.canceled || !result.filePaths[0]) return { ok: true }
+    const draft = project.drafts.find((item) => item.version === task.draftVersion)
+    const safeTitle = String(draft?.title || '小红书配图').replace(/[\\/:*?"<>|]/g, '-').slice(0, 36)
+    let target = path.join(result.filePaths[0], `${safeTitle}-整套配图`)
+    if (await exists(target)) target = path.join(result.filePaths[0], `${safeTitle}-整套配图-${Date.now()}`)
+    await fsp.mkdir(target, { recursive: false })
+    for (let index = 0; index < currentImages.length; index += 1) {
+      const { page, image } = currentImages[index]
+      const label = String(page.label || `第${index + 1}页`).replace(/[\\/:*?"<>|]/g, '-').slice(0, 18)
+      await fsp.copyFile(resolveProjectFile(image.relativePath), path.join(target, `${String(index + 1).padStart(2, '0')}-${label}.png`))
+    }
+    return { ok: true, savedPath: target }
   } catch (error) { return { ok: false, error: error.message } }
 })
 

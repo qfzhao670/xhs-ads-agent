@@ -14,6 +14,11 @@ contextBridge.exposeInMainWorld('workshop', {
   downloadAssetTemplate: (kind) => ipcRenderer.invoke('asset:template', kind),
   importAssetBatch: (kind) => ipcRenderer.invoke('asset:import', kind),
   exportAsset: (kind) => ipcRenderer.invoke('asset:export', kind),
+  uploadImageReferences: (isCover) => ipcRenderer.invoke('image-reference:upload', isCover),
+  retagImageReference: (id) => ipcRenderer.invoke('image-reference:retag', id),
+  setImageReferenceRole: (id, isCover) => ipcRenderer.invoke('image-reference:set-role', id, isCover),
+  toggleImageReference: (id, enabled) => ipcRenderer.invoke('image-reference:toggle', id, enabled),
+  deleteImageReference: (id) => ipcRenderer.invoke('image-reference:delete', id),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),
   saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
@@ -25,11 +30,16 @@ contextBridge.exposeInMainWorld('workshop', {
   reviseDraft: (request, version, thinking) => ipcRenderer.invoke('workflow:revise', request, version, thinking),
   saveManualDraft: (draft) => ipcRenderer.invoke('workflow:manual-save', draft),
   confirmDraft: (version) => ipcRenderer.invoke('workflow:confirm', version),
-  prepareImageBrief: (version) => ipcRenderer.invoke('image:prepare-brief', version),
-  generateImages: (version, brief) => ipcRenderer.invoke('image:generate', version, brief),
-  selectGeneratedImage: (taskId, imageId) => ipcRenderer.invoke('image:select', taskId, imageId),
+  createImageSet: (version) => ipcRenderer.invoke('image:create-set', version),
+  regenerateImagePage: (taskId, pageId, feedback) => ipcRenderer.invoke('image:regenerate-page', taskId, pageId, feedback),
   readGeneratedImage: (relativePath) => ipcRenderer.invoke('image:read', relativePath),
   exportGeneratedImage: (taskId, imageId) => ipcRenderer.invoke('image:export', taskId, imageId),
+  exportImageSet: (taskId) => ipcRenderer.invoke('image:export-set', taskId),
+  onImageProgress: (callback) => {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('image:progress', listener)
+    return () => ipcRenderer.removeListener('image:progress', listener)
+  },
   onModelStream: (callback) => {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('model:stream', listener)
