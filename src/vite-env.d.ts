@@ -2,6 +2,7 @@
 
 interface Window {
   workshop: {
+    showWindow(): void
     chooseProjectFolder(): Promise<ApiResult>
     initializeProject(folder: string): Promise<ApiResult>
     openRecentProject(folder: string): Promise<ApiResult>

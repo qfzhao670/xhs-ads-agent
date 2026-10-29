@@ -48,6 +48,7 @@ const emptyForms = {
 }
 
 function App() {
+  const [restoringWindow, setRestoringWindow] = useState(true)
   const [page, setPage] = useState<Page>('generate')
   const [project, setProject] = useState<ProjectData | null>(null)
   const [recent, setRecent] = useState<string[]>([])
@@ -86,19 +87,41 @@ function App() {
         setRecent(recentProjects)
         setSettings(savedSettings)
         if (currentProject.ok && currentProject.data) {
-          setProject(currentProject.data)
-          setFlowStep(suggestedStep(currentProject.data))
+          const restoredProject = currentProject.data
+          setProject(restoredProject)
+          setFlowStep(suggestedStep(restoredProject))
           setViewGeneration('current')
           setPage('generate')
+          setChoice(restoredProject.selectedStrategyIds || (restoredProject.selectedStrategyId ? [restoredProject.selectedStrategyId] : []))
+          setStrategyAdvice(restoredProject.strategyAdvice || {})
+          setViewVersion(restoredProject.currentDraft?.version || null)
         }
       } catch (e) {
         if (!cancelled) showError(e instanceof Error ? e.message : '恢复应用状态失败')
+      } finally {
+        if (!cancelled) setRestoringWindow(false)
       }
     }
 
     void restoreWindowState()
     return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    if (restoringWindow) return
+
+    // React has committed the restored DOM, but Chromium may not have swapped
+    // that frame to the native window yet. Two frames avoid exposing the prior
+    // bootstrap frame when Electron makes the BrowserWindow visible.
+    let secondFrame = 0
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => window.workshop.showWindow())
+    })
+    return () => {
+      window.cancelAnimationFrame(firstFrame)
+      window.cancelAnimationFrame(secondFrame)
+    }
+  }, [restoringWindow])
 
   useEffect(() => {
     setChoice(project?.selectedStrategyIds || (project?.selectedStrategyId ? [project.selectedStrategyId] : []))
@@ -342,6 +365,10 @@ function App() {
   const selectedStrategies = project?.strategies.filter((item) => project.selectedStrategyIds.includes(item.id)) || []
   const viewedDraft = project?.drafts.find((item) => item.version === viewVersion) || project?.currentDraft || null
   const archived = project?.generationHistory.find((item) => item.id === viewGeneration)
+
+  if (restoringWindow) {
+    return <div className="app-boot" role="status" aria-label="正在恢复应用状态"><LoaderCircle className="spin" size={22} /><span>正在恢复工作台…</span></div>
+  }
 
   return (
     <div className="app-shell">

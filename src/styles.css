@@ -25,6 +25,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--slate); }
+.app-boot { display: flex; min-height: 100vh; align-items: center; justify-content: center; gap: 10px; color: var(--gray-500); background: var(--slate); font-size: 12px; }
 button, input, textarea { font: inherit; }
 button { color: inherit; }
 button:focus-visible, input:focus-visible, textarea:focus-visible {

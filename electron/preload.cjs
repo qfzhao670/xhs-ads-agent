@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('workshop', {
+  showWindow: () => ipcRenderer.send('window:show'),
   chooseProjectFolder: () => ipcRenderer.invoke('project:choose'),
   initializeProject: (folder) => ipcRenderer.invoke('project:initialize', folder),
   openRecentProject: (folder) => ipcRenderer.invoke('project:open', folder),

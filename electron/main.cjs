@@ -624,14 +624,23 @@ async function initializeProject(folder) {
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440, height: 920, minWidth: 1080, minHeight: 700,
+    show: false,
     icon: applicationIconPath(),
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    backgroundColor: '#f3f1ed',
+    backgroundColor: '#f8fafc',
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false },
   })
+  // A renderer failure must not leave the application permanently invisible.
+  const revealFallback = setTimeout(() => { if (!win.isDestroyed() && !win.isVisible()) win.show() }, 15000)
+  win.once('show', () => clearTimeout(revealFallback))
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) win.loadURL('http://127.0.0.1:5173')
   else win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
 }
+
+ipcMain.on('window:show', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win && !win.isDestroyed() && !win.isVisible()) win.show()
+})
 
 ipcMain.handle('project:choose', async () => {
   try {
