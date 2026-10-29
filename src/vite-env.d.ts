@@ -72,7 +72,8 @@ type Reference = {
   id: string; title: string; body: string; hashtags: string[]; enabled: boolean; createdAt: string; updatedAt: string
 }
 type ImageReferenceTags = {
-  summary: string; useCases: string[]; visualStyle: string; composition: string; textLayout: string;
+  summary: string; visualMedium: 'photo' | 'mixed' | 'graphic'; sceneType: string; photographicElements: string[];
+  useCases: string[]; visualStyle: string; composition: string; textLayout: string;
   colorPalette: string[]; keyElements: string[]; keywords: string[]; avoidCopying: string[]
 }
 type ImageReference = {
@@ -86,6 +87,7 @@ type Strategy = { id: string; name: string; angle: string; materialPoints: strin
 type Draft = { version: number; title: string; body: string; hashtags: string[]; strategyId: string; referenceIds: string[]; revisionRequest: string; createdAt: string; confirmed: boolean }
 type ImageBrief = {
   purpose: string; coverTitle: string; subtitle: string; style: 'lifestyle' | 'event' | 'product' | 'guide' | 'editorial';
+  visualMode: 'photoreal' | 'mixed' | 'graphic';
   subject: string; scene: string; composition: string; palette: string[]; mood: string;
   mustShow: string[]; mustAvoid: string[]; extraNotes: string;
   pageRole: 'cover' | 'content' | 'summary'; pageLabel: string; visualContinuity: string

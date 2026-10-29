@@ -68,6 +68,7 @@ function App() {
   const [viewVersion, setViewVersion] = useState<number | null>(null)
   const [thinkingModes, setThinkingModes] = useState({ facts: true, strategies: false, draft: false, revise: false })
   const [stream, setStream] = useState({ operation: '', content: '', thinking: '', done: false })
+  const [imageProgress, setImageProgress] = useState<Record<string, ImageProgressEvent>>({})
   const [referenceProgress, setReferenceProgress] = useState<ImageReferenceProgressEvent | null>(null)
 
   useEffect(() => {
@@ -80,6 +81,8 @@ function App() {
     setStrategyAdvice(project?.strategyAdvice || {})
     setViewVersion(project?.currentDraft?.version || null)
   }, [project?.meta.root, project?.selectedStrategyIds, project?.selectedStrategyId, project?.strategyAdvice, project?.currentDraft?.version])
+
+  useEffect(() => setImageProgress({}), [project?.meta.root, project?.currentGeneration.id])
 
   useEffect(() => window.workshop.onModelStream((payload) => {
     setStream((current) => {
@@ -96,6 +99,12 @@ function App() {
 
   useEffect(() => window.workshop.onImageProgress((payload) => {
     const task = payload.task
+    // Keep progress above ImageStep so switching to an archived generation cannot discard the active canvas state.
+    setImageProgress((current) => ({
+      ...current,
+      [`version:${payload.version}`]: payload,
+      ...(task ? { [`task:${task.id}`]: payload } : {}),
+    }))
     if (!task) return
     setProject((current) => {
       if (!current) return current
@@ -320,6 +329,7 @@ function App() {
           viewGeneration={viewGeneration} setViewGeneration={(id) => { setViewGeneration(id); setFlowStep(id === 'current' && project ? suggestedStep(project) : project?.generationHistory.find((item) => item.id === id)?.imageTasks?.length ? 6 : 5) }} archived={archived}
           newGeneration={newGeneration} busy={busy} setPage={setPage}
           stream={stream}
+          imageProgress={imageProgress}
           resolution={resolution} setResolution={setResolution}
           thinkingModes={thinkingModes} setThinkingMode={(key, value) => setThinkingModes((current) => ({ ...current, [key]: value }))}
           generateFacts={async () => { const ok = await run('facts', () => window.workshop.extractFacts(resolution, thinkingModes.facts), resolution ? '业务事实已重新生成，请核对后继续' : '业务事实已提取，请核对后继续'); if (ok) setResolution('') }}
@@ -362,6 +372,7 @@ type GenerationPageProps = {
   flowStep: number; setFlowStep: (step: number) => void; completed: boolean[]; viewGeneration: string; setViewGeneration: (id: string) => void;
   archived?: GenerationRecord; newGeneration: () => void; busy: string; setPage: (page: Page) => void;
   stream: { operation: string; content: string; thinking: string; done: boolean };
+  imageProgress: Record<string, ImageProgressEvent>;
   thinkingModes: Record<'facts' | 'strategies' | 'draft' | 'revise', boolean>;
   setThinkingMode: (key: 'facts' | 'strategies' | 'draft' | 'revise', value: boolean) => void;
   resolution: string; setResolution: (value: string) => void; generateFacts: () => void; generateStrategies: () => void;
@@ -446,7 +457,7 @@ function CurrentFlow(props: GenerationPageProps) {
   if (flowStep === 3) return <StrategyStep project={project} busy={props.busy} thinking={props.thinkingModes.strategies} setThinking={(value) => props.setThinkingMode('strategies', value)} generate={props.generateStrategies} choice={props.choice} setChoice={props.setChoice} strategyAdvice={props.strategyAdvice} setStrategyAdvice={props.setStrategyAdvice} save={props.saveStrategy} />
   if (flowStep === 4) return <ComposeStep project={project} strategies={props.selectedStrategies} busy={props.busy} thinking={props.thinkingModes.draft} setThinking={(value) => props.setThinkingMode('draft', value)} generate={props.generateDraft} back={() => props.setFlowStep(3)} />
   if (flowStep === 5) return <ReviewStep key={props.draft?.version ?? 'empty'} project={project} draft={props.draft} viewVersion={props.viewVersion} setViewVersion={props.setViewVersion} revision={props.revision} setRevision={props.setRevision} busy={props.busy} thinking={props.thinkingModes.revise} setThinking={(value) => props.setThinkingMode('revise', value)} revise={props.revise} saveManual={props.saveManual} confirm={props.confirm} goImages={() => props.setFlowStep(6)} />
-  return <ImageStep project={project} busy={props.busy} createImageSet={props.createImageSet} regenerateImage={props.regenerateImage} exportImage={props.exportImage} exportImageSet={props.exportImageSet} goReferenceLibrary={props.goReferenceLibrary} />
+  return <ImageStep project={project} busy={props.busy} stream={props.stream} imageProgress={props.imageProgress} createImageSet={props.createImageSet} regenerateImage={props.regenerateImage} exportImage={props.exportImage} exportImageSet={props.exportImageSet} goReferenceLibrary={props.goReferenceLibrary} />
 }
 
 function StepHeader({ step, title, children, action }: { step: string; title: string; children: React.ReactNode; action?: React.ReactNode }) {
@@ -520,8 +531,8 @@ function ReviewStep({ project, draft, viewVersion, setViewVersion, revision, set
   </section>
 }
 
-function ImageStep({ project, busy, createImageSet, regenerateImage, exportImage, exportImageSet, goReferenceLibrary }: {
-  project: ProjectData; busy: string; createImageSet: (version: number) => Promise<boolean>;
+function ImageStep({ project, busy, stream, imageProgress, createImageSet, regenerateImage, exportImage, exportImageSet, goReferenceLibrary }: {
+  project: ProjectData; busy: string; stream: { operation: string; content: string; thinking: string; done: boolean }; imageProgress: Record<string, ImageProgressEvent>; createImageSet: (version: number) => Promise<boolean>;
   regenerateImage: (taskId: string, pageId: string, feedback: string) => Promise<boolean>;
   exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void; goReferenceLibrary: () => void;
 }) {
@@ -530,17 +541,22 @@ function ImageStep({ project, busy, createImageSet, regenerateImage, exportImage
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({})
   const [feedbacks, setFeedbacks] = useState<Record<string, string>>({})
   const [editingPage, setEditingPage] = useState('')
-  const [progress, setProgress] = useState<ImageProgressEvent | null>(null)
+  const planningStreamRef = useRef<HTMLPreElement>(null)
   const draft = confirmedDrafts.find((item) => item.version === selectedVersion) || confirmedDrafts[0]
   const task = project.imageTasks.find((item) => item.draftVersion === draft?.version && item.strategyId === draft?.strategyId)
+  const versionProgress = draft ? imageProgress[`version:${draft.version}`] : undefined
+  const taskProgress = task ? imageProgress[`task:${task.id}`] : undefined
+  // Planning can arrive before a task exists; once drawing starts, the task-scoped event survives page unmounts.
+  const progress = busy === 'image-set' && versionProgress?.phase === 'planning' ? versionProgress : taskProgress || versionProgress || null
 
   useEffect(() => {
     if (!draft && confirmedDrafts[0]) setSelectedVersion(confirmedDrafts[0].version)
   }, [draft, confirmedDrafts])
 
-  useEffect(() => window.workshop.onImageProgress((payload) => {
-    if (payload.version === draft?.version) setProgress(payload)
-  }), [draft?.version])
+  const planningContent = stream.operation === `image-plan:${draft?.version || 0}` ? stream.content : ''
+  useEffect(() => {
+    if (planningStreamRef.current) planningStreamRef.current.scrollTop = planningStreamRef.current.scrollHeight
+  }, [planningContent])
 
   useEffect(() => {
     let active = true
@@ -577,7 +593,7 @@ function ImageStep({ project, busy, createImageSet, regenerateImage, exportImage
 
     {generatingSet && (!task || pages.length < 4) ? <div className="image-planning-stage" aria-live="polite">
       <div className="planning-copy"><span><LoaderCircle className="spin" size={17} /></span><div><b>{progress?.label || '正在拆解文案与翻页节奏'}</b><small>先展开画布，规划完成后会逐张呈现成品</small></div></div>
-      <div className="planning-canvases">{Array.from({ length: 4 }, (_, index) => <div className="planning-canvas" key={index}><span>{String(index + 1).padStart(2, '0')}</span><i /></div>)}</div>
+      <div className="planning-stream"><div><Sparkles size={14} /><span>套图策划实时输出</span><small>{stream.done ? '正在整理策划结果' : '生成中'}</small></div><pre ref={planningStreamRef}>{planningContent || '正在读取已确认文案、业务事实与参考图片标签…'}</pre><i aria-hidden="true" /></div>
     </div> : !task || pages.length < 4 ? <ActionState
       icon={<ImagePlus size={27} />}
       title={`为「${draft.title}」生成整套配图`}
@@ -839,9 +855,9 @@ function ImageReferenceLibrary({ items, busy, progress, upload, retag, setRole, 
     return () => { active = false }
   }, [items])
   const importing = busy.startsWith('upload-image-reference-') && progress && progress.phase !== 'done'
-  return <><div className="asset-toolbar image-reference-toolbar"><div><h2>小红书图片参考库</h2><p>上传你认为优秀的配图并标明页面类型。视觉模型会生成可检索标签，Qwen Image 只借鉴视觉方法，不复制样本事实。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={() => upload(false)} disabled={!!busy}>{busy === 'upload-image-reference-content' ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}上传内容页</button><button className="primary compact" onClick={() => upload(true)} disabled={!!busy}>{busy === 'upload-image-reference-cover' ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}上传封面</button></div></div>{importing && <div className="reference-import-progress" aria-live="polite"><span className="reference-import-pulse"><Sparkles size={17} /></span><div><b>{progress.label}</b><small>图片已进入素材库，分析结果会逐张补全</small></div><strong>{progress.current}/{progress.total}</strong><div className="generation-meter"><i style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} /></div></div>}{items.length === 0 ? <div className="image-reference-empty"><div className="reference-empty-frame"><ImageIcon size={32} /></div><div><h3>用好样本教会模型什么是“像小红书”</h3><p>建议先上传 3–6 张封面和 3–6 张内容页。上传时即完成页面类型标注，随后自动分析构图、文字布局、配色和适用场景。</p></div></div> : <div className="image-reference-grid">{items.map((item) => {
+  return <><div className="asset-toolbar image-reference-toolbar"><div><h2>小红书图片参考库</h2><p>上传你认为优秀的配图并标明页面类型。视觉模型会识别摄影实景、混合排版与纯图形样本；Qwen Image 只借鉴视觉方法，不复制样本事实。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={() => upload(false)} disabled={!!busy}>{busy === 'upload-image-reference-content' ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}上传内容页</button><button className="primary compact" onClick={() => upload(true)} disabled={!!busy}>{busy === 'upload-image-reference-cover' ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}上传封面</button></div></div>{importing && <div className="reference-import-progress" aria-live="polite"><span className="reference-import-pulse"><Sparkles size={17} /></span><div><b>{progress.label}</b><small>图片已进入素材库，分析结果会逐张补全</small></div><strong>{progress.current}/{progress.total}</strong><div className="generation-meter"><i style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} /></div></div>}{items.length === 0 ? <div className="image-reference-empty"><div className="reference-empty-frame"><ImageIcon size={32} /></div><div><h3>用好样本教会模型什么是“像小红书”</h3><p>建议先上传 3–6 张封面和 3–6 张内容页。系统会分析摄影/图形媒介、场景、光线、构图、文字布局与配色。</p></div></div> : <div className="image-reference-grid">{items.map((item) => {
     const activeBusy = busy.endsWith(item.id)
-    return <article key={item.id} className={`image-reference-card ${item.enabled ? '' : 'disabled'} ${item.taggingStatus}`}><div className="reference-preview">{sources[item.id] ? <img src={sources[item.id]} alt={item.tags.summary || item.originalName} /> : <span><LoaderCircle className="spin" size={20} /></span>}<b>{item.isCover ? '封面样本' : '内容页样本'}</b><code>{item.id}</code></div><div className="reference-card-copy"><div className="reference-card-head"><div><h3>{item.tags.summary || item.originalName}</h3><span>{item.width} × {item.height}</span></div><label className="switch" title={item.enabled ? '点击停用' : '点击生效'}><input type="checkbox" checked={item.enabled} onChange={(event) => toggle(item.id, event.target.checked)} disabled={!!busy} /><span /></label></div>{item.taggingStatus === 'ready' ? <><p>{[item.tags.visualStyle, item.tags.composition, item.tags.textLayout].filter(Boolean).join(' · ')}</p><div className="reference-use-cases">{item.tags.useCases.slice(0, 3).map((value) => <span key={value}>{value}</span>)}</div><div className="reference-keywords">{item.tags.keywords.slice(0, 5).map((value) => <small key={value}>#{value}</small>)}</div></> : item.taggingStatus === 'failed' ? <div className="reference-tag-error"><b>自动打标失败</b><span>{item.taggingError}</span></div> : <div className="reference-tagging"><LoaderCircle className="spin" size={15} /><span>正在分析视觉结构</span></div>}<div className="reference-card-actions"><button className="text-button" onClick={() => setRole(item.id, !item.isCover)} disabled={!!busy}>{activeBusy ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}改为{item.isCover ? '内容页' : '封面'}</button><button className="text-button" onClick={() => retag(item.id)} disabled={!!busy}><Sparkles size={14} />重新打标</button><button className="icon-button danger" onClick={() => remove(item.id)} disabled={!!busy} title="删除参考图片"><Trash2 size={14} /></button></div></div></article>
+    return <article key={item.id} className={`image-reference-card ${item.enabled ? '' : 'disabled'} ${item.taggingStatus}`}><div className="reference-preview">{sources[item.id] ? <img src={sources[item.id]} alt={item.tags.summary || item.originalName} /> : <span><LoaderCircle className="spin" size={20} /></span>}<b>{item.isCover ? '封面样本' : '内容页样本'}</b><code>{item.id}</code></div><div className="reference-card-copy"><div className="reference-card-head"><div><h3>{item.tags.summary || item.originalName}</h3><span>{item.width} × {item.height}</span></div><label className="switch" title={item.enabled ? '点击停用' : '点击生效'}><input type="checkbox" checked={item.enabled} onChange={(event) => toggle(item.id, event.target.checked)} disabled={!!busy} /><span /></label></div>{item.taggingStatus === 'ready' ? <><p>{[item.tags.visualStyle, item.tags.composition, item.tags.textLayout].filter(Boolean).join(' · ')}</p><div className="reference-use-cases"><span>{item.tags.visualMedium === 'photo' ? '摄影实景' : item.tags.visualMedium === 'mixed' ? '实景＋设计' : '图形设计'}</span>{item.tags.useCases.slice(0, 3).map((value) => <span key={value}>{value}</span>)}</div><div className="reference-keywords">{item.tags.keywords.slice(0, 5).map((value) => <small key={value}>#{value}</small>)}</div></> : item.taggingStatus === 'failed' ? <div className="reference-tag-error"><b>自动打标失败</b><span>{item.taggingError}</span></div> : <div className="reference-tagging"><LoaderCircle className="spin" size={15} /><span>正在分析视觉结构</span></div>}<div className="reference-card-actions"><button className="text-button" onClick={() => setRole(item.id, !item.isCover)} disabled={!!busy}>{activeBusy ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}改为{item.isCover ? '内容页' : '封面'}</button><button className="text-button" onClick={() => retag(item.id)} disabled={!!busy}><Sparkles size={14} />重新打标</button><button className="icon-button danger" onClick={() => remove(item.id)} disabled={!!busy} title="删除参考图片"><Trash2 size={14} /></button></div></div></article>
   })}</div>}</>
 }
 

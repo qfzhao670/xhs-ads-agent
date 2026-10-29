@@ -7,10 +7,12 @@ const {
   buildXhsImagePrompt,
   detectImageProtocol,
   formatImageApiError,
+  inferReferenceVisualMedium,
   normalizeImageSettings,
   parseImageApiResponse,
   resolveImageEndpoint,
   sanitizeImageBrief,
+  sanitizeImageReferenceTags,
 } = require('./image-utils.cjs')
 
 test('sanitizes a partial image brief with safe defaults', () => {
@@ -18,6 +20,22 @@ test('sanitizes a partial image brief with safe defaults', () => {
   assert.equal(brief.coverTitle, '周末遛娃新去处')
   assert.equal(brief.style, 'lifestyle')
   assert.match(brief.composition, /标题区域/)
+  assert.equal(brief.visualMode, 'photoreal')
+})
+
+test('classifies photographic references and keeps explicit visual metadata', () => {
+  assert.equal(inferReferenceVisualMedium({ visualStyle: '自然光纪实摄影，真实校园空间' }), 'photo')
+  assert.equal(inferReferenceVisualMedium({ visualStyle: '手绘插画与纸张拼贴' }), 'graphic')
+  assert.equal(inferReferenceVisualMedium({ visualStyle: '实拍照片叠加卡片式信息图' }), 'mixed')
+  assert.equal(inferReferenceVisualMedium({ visualStyle: '简洁高级视觉' }), 'graphic')
+  const tags = sanitizeImageReferenceTags({
+    visualMedium: 'photo',
+    sceneType: '户外校园',
+    photographicElements: ['自然光', '广角空间'],
+  })
+  assert.equal(tags.visualMedium, 'photo')
+  assert.equal(tags.sceneType, '户外校园')
+  assert.deepEqual(tags.photographicElements, ['自然光', '广角空间'])
 })
 
 test('builds a prompt with exact quoted Chinese copy and xhs layout constraints', () => {
@@ -34,6 +52,9 @@ test('builds a prompt with exact quoted Chinese copy and xhs layout constraints'
   assert.match(prompt, /不得改写、增字、漏字/)
   assert.match(prompt, /第三方小红书视觉样本/)
   assert.match(prompt, /严禁照搬其中的人物身份、商品、品牌/)
+  assert.match(prompt, /视觉媒介（最高优先级）/)
+  assert.match(prompt, /全幅写实摄影场景/)
+  assert.match(prompt, /禁止改成手绘插画/)
 })
 
 test('describes reference images as visual few-shot samples instead of factual inputs', () => {
@@ -43,6 +64,15 @@ test('describes reference images as visual few-shot samples instead of factual i
   assert.match(prompt, /few-shot 设计参考/)
   assert.match(prompt, /XHSIMG-0007/)
   assert.match(prompt, /唯一内容依据/)
+})
+
+test('preserves photographic reference cues instead of flattening them into illustration', () => {
+  const prompt = buildReferenceUsePrompt([
+    { id: 'XHSIMG-0012', isCover: true, tags: { visualMedium: 'photo', summary: '校园实景封面', sceneType: '户外校园', photographicElements: ['自然侧光', '广角建筑空间'] } },
+  ])
+  assert.match(prompt, /摄影实景/)
+  assert.match(prompt, /实景线索：户外校园、自然侧光、广角建筑空间/)
+  assert.match(prompt, /而不是把它重新解释成手绘/)
 })
 
 test('builds distinct content-page prompts with suite continuity', () => {
@@ -64,6 +94,22 @@ test('negative prompt includes defaults and project-specific exclusions', () => 
   const prompt = buildNegativePrompt({ mustAvoid: ['红色背景'] })
   assert.match(prompt, /乱码文字/)
   assert.match(prompt, /红色背景/)
+  assert.match(prompt, /纯插画/)
+  assert.match(prompt, /纸张拼贴/)
+})
+
+test('mixed visual mode requires a real-scene base without banning editorial overlays', () => {
+  const prompt = buildXhsImagePrompt({
+    pageRole: 'content',
+    coverTitle: '三步看懂流程',
+    style: 'guide',
+    visualMode: 'mixed',
+  })
+  assert.match(prompt, /真实摄影或高写实场景作为至少 60%/)
+  assert.match(prompt, /实景不是装饰性小照片/)
+  const negative = buildNegativePrompt({ style: 'guide', visualMode: 'mixed' })
+  assert.match(negative, /无实景底图/)
+  assert.doesNotMatch(negative, /纯插画/)
 })
 
 test('normalizes image settings and forces one image per page', () => {

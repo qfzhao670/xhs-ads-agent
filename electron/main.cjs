@@ -275,7 +275,7 @@ async function callVisionTagger(reference) {
         messages: [
           { role: 'system', content: '你是小红书视觉样本分析器。只输出合法 JSON。你的任务是描述可复用的视觉方法，不得把样本中的人物、品牌或业务信息当作未来内容事实。' },
           { role: 'user', content: [
-            { type: 'text', text: `这张图片由用户标注为“${role}”。请分析它适合被哪些小红书选题和页面职责参考，以及可复用的视觉结构。不要评价业务真实性，不要抄录长段原文。输出：{"summary":"一句话描述这幅图适合参考的场景","useCases":["适用场景"],"visualStyle":"视觉风格与质感","composition":"构图和视觉动线","textLayout":"标题与信息排版方式","colorPalette":["主要颜色"],"keyElements":["关键视觉元素"],"keywords":["检索关键词"],"avoidCopying":["不能照搬的具体内容"]}` },
+            { type: 'text', text: `这张图片由用户标注为“${role}”。请分析它适合被哪些小红书选题和页面职责参考，以及可复用的视觉结构。必须判断它的主视觉媒介：photo=摄影实景为主，mixed=实景与排版/插画混合，graphic=纯插画、拼贴或信息设计。若含实景，具体描述空间类型、光线、镜头感、人物或物件与环境关系，方便后续优先召回真实场景。不要评价业务真实性，不要抄录长段原文。输出：{"summary":"一句话描述这幅图适合参考的场景","visualMedium":"photo|mixed|graphic","sceneType":"室内/户外/城市/校园/自然/产品场景等，没有则留空","photographicElements":["自然光、广角空间、人物互动等实景要素"],"useCases":["适用场景"],"visualStyle":"视觉风格与质感","composition":"构图和视觉动线","textLayout":"标题与信息排版方式","colorPalette":["主要颜色"],"keyElements":["关键视觉元素"],"keywords":["检索关键词"],"avoidCopying":["不能照搬的具体内容"]}` },
             { type: 'image_url', image_url: { url: source } },
           ] },
         ],
@@ -441,7 +441,7 @@ function sanitizeImagePlan(value, draft, imageReferences) {
   const validIds = new Set(enabledReferences.map((item) => item.id))
   if (!validIds.size) throw new Error('没有已完成打标的参考图片，请先在素材管理中上传图片')
   const visualContinuity = String(value.visualContinuity || value.visualSystem || '').trim()
-  const pages = rawPages.map((page, index) => {
+  let pages = rawPages.map((page, index) => {
     const role = index === 0 ? 'cover' : index === rawPages.length - 1 && page.role === 'summary' ? 'summary' : 'content'
     const id = `PAGE-${String(index + 1).padStart(2, '0')}`
     const label = String(page.label || (role === 'cover' ? '封面' : role === 'summary' ? '收束页' : `内容页 ${index}`)).trim()
@@ -456,15 +456,35 @@ function sanitizeImagePlan(value, draft, imageReferences) {
     if (!referenceImageIds.length) throw new Error(`${label}没有选择有效参考图，请重新生成图片策划`)
     return { id, role, label, purpose: brief.purpose, title: brief.coverTitle, referenceImageIds, brief }
   })
+  const photographicReferences = enabledReferences.filter((reference) => ['photo', 'mixed'].includes(reference.tags?.visualMedium))
+  if (photographicReferences.length) {
+    const targetCount = Math.min(3, Math.max(2, Math.floor(pages.length / 2)))
+    const preferredIndexes = [...new Set([
+      ...pages.map((page, index) => ['lifestyle', 'event', 'product'].includes(page.brief.style) ? index : -1),
+      0,
+      ...pages.map((page, index) => page.role !== 'summary' ? index : -1),
+    ].filter((index) => index >= 0))].slice(0, targetCount)
+    pages = pages.map((page, index) => {
+      if (!preferredIndexes.includes(index)) return page
+      const selectedPhotographic = page.referenceImageIds
+        .map((id) => photographicReferences.find((reference) => reference.id === id))
+        .find(Boolean)
+      const roleMatched = photographicReferences.find((reference) => reference.isCover === (page.role === 'cover'))
+      const photographicReference = selectedPhotographic || roleMatched || photographicReferences[0]
+      const referenceImageIds = [...new Set([photographicReference.id, ...page.referenceImageIds])].slice(0, 3)
+      const visualMode = ['lifestyle', 'event', 'product'].includes(page.brief.style) ? 'photoreal' : 'mixed'
+      return { ...page, referenceImageIds, brief: { ...page.brief, visualMode } }
+    })
+  }
   return {
-    version: 2,
+    version: 3,
     concept: String(value.concept || '围绕本篇文案形成连贯视觉叙事').trim(),
     visualContinuity,
     pages,
   }
 }
 
-async function createImagePlan(project, draft) {
+async function createImagePlan(project, draft, onChunk = () => {}) {
   const strategy = project.strategies.find((item) => item.id === draft.strategyId)
   const rules = project.rules.filter((item) => item.enabled !== false)
   const enabledImageReferences = project.imageReferences.filter((item) => item.enabled !== false && item.taggingStatus === 'ready')
@@ -477,10 +497,11 @@ async function createImagePlan(project, draft) {
 2. 整套图形成清楚的翻页叙事：封面点题 → 核心信息/过程/细节/证据 → 总结或行动提示。不要为了凑数量重复同一卖点。
 3. 所有页面保持统一的配色、字体气质、边距和识别元素，但构图与画面主体必须有明显变化。
 4. 用户不会编辑专业参数，因此你要直接做出完整设计判断。每页只保留一个短标题和一个可选副标题，避免密集小字。
-5. 只能使用给出的事实和文案信息，不得虚构人物、地点、行程、价格、权益、资质、奖项或效果。没有真实照片依据时，优先采用编辑设计、信息卡片、物件静物或抽象视觉，不要伪造实拍现场。
-6. style 只能从 lifestyle、event、product、guide、editorial 中选择。palette、mustShow、mustAvoid 是简短字符串数组。
-7. 你必须只根据下方“参考图片文字标签”判断每一页最适合参考哪些样本，并为每页填写 1–3 个 referenceImageIds。封面优先选择 isCover=true，内容页优先选择 isCover=false；相关性比数量重要。
-8. 参考样本只用于借鉴版式、构图、配色、字体气质和视觉节奏。不得把样本中的人物、商品、品牌、文字、地点或业务信息写进页面策划。页面内容只能来自本篇业务事实与文案。
+5. 不要把 4–6 页全部做成插画、纸张拼贴、信息卡片或物件静物。只要参考库中存在 visualMedium=photo 或 mixed 的样本，就必须让整套图中至少 2 页、6 页套图中至少 3 页使用真实摄影感场景：全幅实景或以实景为主的编辑排版。封面、人物/活动/空间/过程/体验类页面优先采用实景；只有清单、费用拆解、流程图等确实需要解释结构的页面才优先用纯信息设计。
+6. 可以让图片模型根据已确认事实绘制写实场景，不需要素材库提供本项目现场照片。写实场景是视觉表达，不得冒充纪实证据，也不得凭空增加具体人物身份、未确认地点细节、行程、价格、权益、资质、奖项或效果。
+7. visualMode 只能从 photoreal、mixed、graphic 中选择：photoreal=全幅摄影级实景，mixed=至少 60% 实景底图加少量编辑排版，graphic=纯信息设计/插画。style 只能从 lifestyle、event、product、guide、editorial 中选择。palette、mustShow、mustAvoid 是简短字符串数组。
+8. 你必须只根据下方“参考图片文字标签”判断每一页最适合参考哪些样本，并为每页填写 1–3 个 referenceImageIds。实景页必须优先选择 visualMedium=photo 或 mixed 的样本，并将它放在 referenceImageIds 第一位；封面优先选择 isCover=true，内容页优先选择 isCover=false；相关性比数量重要。
+9. 参考样本只用于借鉴版式、构图、配色、字体气质、摄影媒介、光线和视觉节奏。不得把样本中的人物、商品、品牌、文字、地点或业务信息写进页面策划。页面内容只能来自本篇业务事实与文案。
 
 业务事实：${JSON.stringify(project.facts)}
 选定策略：${JSON.stringify(strategy)}
@@ -488,8 +509,8 @@ async function createImagePlan(project, draft) {
 合规准则：${JSON.stringify(rules)}
 参考图片文字标签：${JSON.stringify(referenceCatalog)}
 
-只输出 JSON 对象：{"concept":"整套图的叙事概念","visualContinuity":"整套图统一的颜色、排版、材质和识别元素","pages":[{"role":"cover","label":"封面","purpose":"本页承担的职责","referenceImageIds":["XHSIMG-0001"],"coverTitle":"短标题","subtitle":"可选短副标题","style":"editorial","subject":"具体画面主体","scene":"场景、动作、光线和道具","composition":"构图与信息层级","palette":["颜色1","颜色2"],"mood":"氛围","mustShow":["必须出现"],"mustAvoid":["不得出现"],"extraNotes":"必要补充"}]}`
-  const result = await callModel(modelSystem, prompt, () => {}, false)
+只输出 JSON 对象：{"concept":"整套图的叙事概念","visualContinuity":"整套图统一的颜色、排版、材质和识别元素","pages":[{"role":"cover","label":"封面","purpose":"本页承担的职责","referenceImageIds":["XHSIMG-0001"],"coverTitle":"短标题","subtitle":"可选短副标题","style":"editorial","visualMode":"photoreal","subject":"具体画面主体","scene":"具体空间、动作、自然光线、镜头视角和道具","composition":"构图与信息层级","palette":["颜色1","颜色2"],"mood":"氛围","mustShow":["必须出现"],"mustAvoid":["不得出现"],"extraNotes":"必要补充"}]}`
+  const result = await callModel(modelSystem, prompt, onChunk, false)
   return sanitizeImagePlan(result, draft, project.imageReferences)
 }
 
@@ -497,6 +518,8 @@ async function rewriteImagePage(project, task, page, feedback) {
   const currentImageId = task.currentImageIds?.[page.id]
   const currentImage = task.images.find((item) => item.id === currentImageId)
   const request = String(feedback || '').trim()
+  const enabledImageReferences = project.imageReferences.filter((item) => item.enabled !== false && item.taggingStatus === 'ready')
+  const referenceCatalog = enabledImageReferences.map((item) => ({ id: item.id, isCover: item.isCover, tags: item.tags }))
   const prompt = `请重写这张小红书配图的视觉策划，然后再交给图片模型生成。必须产生实质变化，不能只是换随机种子。
 
 ${request ? `用户改进建议：${request}` : '用户没有填写建议。请主动诊断当前方案，从构图、视觉主体、信息层级或表现手法中选择至少两项进行明显优化，同时保持本页职责和准确文字不变。'}
@@ -507,16 +530,32 @@ ${request ? `用户改进建议：${request}` : '用户没有填写建议。请�
 上次实际图片提示词：${currentImage?.prompt || ''}
 业务事实：${JSON.stringify(project.facts)}
 合规准则：${JSON.stringify(project.rules.filter((item) => item.enabled !== false))}
+可用参考图片标签：${JSON.stringify(referenceCatalog)}
 
-不得新增未经证实的事实；必须保持与整套图一致，但新构图要能让用户一眼看出变化。只输出与当前页面策划相同字段的 JSON 对象。`
+不得新增未经证实的事实；必须保持与整套图一致，但新构图要能让用户一眼看出变化。若用户没有明确要求纯插画/纯信息图，且参考库中存在 photo 或 mixed 样本，优先把新版本改为 photoreal 或 mixed，并选择 1–3 张参考图，将摄影实景样本放在第一位。写实场景是生成式视觉表达，不冒充现场纪录。只输出 JSON 对象：{"referenceImageIds":["XHSIMG-0001"],"visualMode":"photoreal|mixed|graphic","coverTitle":"短标题","subtitle":"副标题","style":"lifestyle|event|product|guide|editorial","subject":"主体","scene":"场景、动作、光线和镜头","composition":"构图","palette":["颜色"],"mood":"氛围","mustShow":["元素"],"mustAvoid":["元素"],"extraNotes":"补充"}。`
   const result = await callModel(modelSystem, prompt, () => {}, false)
-  return sanitizeImageBrief({
+  const photographicReferences = enabledImageReferences.filter((reference) => ['photo', 'mixed'].includes(reference.tags?.visualMedium))
+  const explicitlyGraphic = /(纯插画|手绘|拼贴|信息图|纯排版)/.test(request)
+  const explicitlyPhotographic = /(实景|实拍|照片|摄影|写实)/.test(request)
+  const shouldUsePhotography = photographicReferences.length && !explicitlyGraphic && (explicitlyPhotographic || !request)
+  const brief = sanitizeImageBrief({
     ...result,
+    visualMode: explicitlyGraphic ? 'graphic' : explicitlyPhotographic ? 'photoreal' : shouldUsePhotography && result.visualMode === 'graphic' ? 'mixed' : result.visualMode,
     pageRole: page.role,
     pageLabel: page.label,
     purpose: page.purpose,
     visualContinuity: task.plan.visualContinuity,
   }, page.title)
+  let referenceImageIds = [...new Set((Array.isArray(result.referenceImageIds) ? result.referenceImageIds : page.referenceImageIds).map(String)
+    .filter((id) => enabledImageReferences.some((reference) => reference.id === id)))].slice(0, 3)
+  if (shouldUsePhotography || ['photoreal', 'mixed'].includes(brief.visualMode)) {
+    const selectedPhotographic = referenceImageIds.map((id) => photographicReferences.find((reference) => reference.id === id)).find(Boolean)
+    const roleMatched = photographicReferences.find((reference) => reference.isCover === (page.role === 'cover'))
+    const photographicReference = selectedPhotographic || roleMatched || photographicReferences[0]
+    if (photographicReference) referenceImageIds = [...new Set([photographicReference.id, ...referenceImageIds])].slice(0, 3)
+  }
+  if (!referenceImageIds.length) referenceImageIds = page.referenceImageIds
+  return { brief, referenceImageIds }
 }
 
 async function generateImagePage(project, task, page, brief, feedback = '') {
@@ -1095,6 +1134,8 @@ ipcMain.handle('workflow:confirm', async (_event, version) => {
 })
 
 ipcMain.handle('image:create-set', async (event, version) => {
+  const planningOperation = `image-plan:${Number(version) || 0}`
+  let planningStreamActive = false
   try {
     const project = await loadProject()
     const draft = project?.drafts.find((item) => item.version === Number(version) && item.confirmed)
@@ -1105,10 +1146,14 @@ ipcMain.handle('image:create-set', async (event, version) => {
     let task = taskIndex >= 0 ? normalizeImageTask(tasks[taskIndex]) : null
     const usableReferenceIds = new Set(project.imageReferences.filter((item) => item.enabled !== false && item.taggingStatus === 'ready').map((item) => item.id))
     const planNeedsReferences = !task?.plan?.pages?.every((page) => page.referenceImageIds?.some((id) => usableReferenceIds.has(id)))
+    const planNeedsPhotographicUpgrade = task && Number(task.plan?.version || 0) < 3
 
-    if (!task || task.plan.pages.length < 4 || planNeedsReferences) {
+    if (!task || task.plan.pages.length < 4 || planNeedsReferences || planNeedsPhotographicUpgrade) {
       event.sender.send('image:progress', { version: draft.version, phase: 'planning', current: 0, total: 0, label: '正在规划整套图片' })
-      const plan = await createImagePlan(project, draft)
+      planningStreamActive = true
+      const plan = await createImagePlan(project, draft, modelStream(event, planningOperation))
+      modelStreamDone(event, planningOperation)
+      planningStreamActive = false
       const artifactDir = projectRelative(path.join(outputPath('配图'), project.currentGeneration.id, `${draft.strategyId}_v${draft.version}`))
       task = {
         id: taskId,
@@ -1166,6 +1211,7 @@ ipcMain.handle('image:create-set', async (event, version) => {
     event.sender.send('image:progress', { version: draft.version, phase: 'done', current: task.plan.pages.length, total: task.plan.pages.length, label: '整套配图已生成', task })
     return { ok: true, data: await loadProject() }
   } catch (error) {
+    if (planningStreamActive) modelStreamDone(event, planningOperation)
     return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined }
   }
 })
@@ -1201,11 +1247,13 @@ ipcMain.handle('image:regenerate-page', async (event, taskId, pageId, feedback) 
     const page = task.plan.pages[pageIndex]
 
     event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'rewriting', current: 0, total: 1, label: `正在重写${page.label}提示词`, task })
-    const rewrittenBrief = await rewriteImagePage(generationProject, task, page, feedback)
+    const rewritten = await rewriteImagePage(generationProject, task, page, feedback)
+    const rewrittenBrief = rewritten.brief
+    const generationPage = { ...page, referenceImageIds: rewritten.referenceImageIds }
     event.sender.send('image:progress', { version: task.draftVersion, pageId: page.id, phase: 'generating', current: 1, total: 1, label: `正在重新生成${page.label}`, task })
-    const image = await generateImagePage(generationProject, task, page, rewrittenBrief, feedback)
+    const image = await generateImagePage(generationProject, task, generationPage, rewrittenBrief, feedback)
 
-    const rewrittenPage = { ...page, title: rewrittenBrief.coverTitle, purpose: rewrittenBrief.purpose, brief: rewrittenBrief }
+    const rewrittenPage = { ...generationPage, title: rewrittenBrief.coverTitle, purpose: rewrittenBrief.purpose, brief: rewrittenBrief }
     task.plan = { ...task.plan, pages: task.plan.pages.map((item, itemIndex) => itemIndex === pageIndex ? rewrittenPage : item) }
     task.images = [...task.images, image]
     task.currentImageIds = { ...task.currentImageIds, [page.id]: image.id }
