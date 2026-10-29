@@ -16,6 +16,8 @@ interface Window {
     importAssetBatch(kind: BatchAssetKind): Promise<ApiResult>
     exportAsset(kind: AssetKind): Promise<ApiResult>
     uploadImageReferences(isCover: boolean): Promise<ApiResult>
+    importImageReferencePackage(): Promise<ApiResult>
+    exportImageReferencePackage(): Promise<ApiResult>
     retagImageReference(id: string): Promise<ApiResult>
     setImageReferenceRole(id: string, isCover: boolean): Promise<ApiResult>
     toggleImageReference(id: string, enabled: boolean): Promise<ApiResult>
@@ -44,7 +46,7 @@ interface Window {
 
 type AssetKind = 'keywords' | 'references' | 'rules'
 type BatchAssetKind = AssetKind
-type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; failed?: number; savedPath?: string; imageUrl?: string }
+type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; exported?: number; skipped?: number; failed?: number; savedPath?: string; imageUrl?: string }
 type ImageModelSettings = {
   enabled: boolean; protocol: 'dashscope' | 'openai'; baseUrl: string; apiKey: string; model: string; size: string; count: number;
   promptExtendMode: 'agent' | 'direct'; enableThinking: boolean; watermark: boolean

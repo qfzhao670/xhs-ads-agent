@@ -16,10 +16,10 @@
     "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "latest",
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
     "concurrently": "latest",
     "electron": "45.0.0",
     "electron-builder": "latest",
@@ -76,5 +76,8 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     }
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1"
   }
 }

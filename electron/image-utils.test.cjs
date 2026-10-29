@@ -116,9 +116,13 @@ test('normalizes image settings and forces one image per page', () => {
   const settings = normalizeImageSettings({ enabled: true, count: 99, promptExtendMode: 'agent' })
   assert.equal(settings.enabled, true)
   assert.equal(settings.protocol, 'dashscope')
+  assert.equal(settings.baseUrl, 'https://dashscope.aliyuncs.com/compatible-mode/v1')
   assert.equal(settings.count, 1)
   assert.equal(settings.promptExtendMode, 'direct')
   assert.equal(settings.model, 'qwen-image-3.0-pro')
+  assert.equal(settings.size, '1080x1440')
+  assert.equal(settings.enableThinking, false)
+  assert.equal(settings.watermark, false)
 })
 
 test('resolves a Model Studio workspace domain to the recommended DashScope endpoint', () => {

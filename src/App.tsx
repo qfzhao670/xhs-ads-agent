@@ -20,8 +20,8 @@ const flowSteps = [
 ] as const
 
 const defaultImageSettings: ImageModelSettings = {
-  enabled: false, protocol: 'dashscope', baseUrl: '', apiKey: '', model: 'qwen-image-3.0-pro', size: '1080x1440', count: 1,
-  promptExtendMode: 'direct', enableThinking: true, watermark: false,
+  enabled: true, protocol: 'dashscope', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', apiKey: '', model: 'qwen-image-3.0-pro', size: '1080x1440', count: 1,
+  promptExtendMode: 'direct', enableThinking: false, watermark: false,
 }
 
 function resolvedImageEndpoint(settings: ImageModelSettings) {
@@ -72,8 +72,32 @@ function App() {
   const [referenceProgress, setReferenceProgress] = useState<ImageReferenceProgressEvent | null>(null)
 
   useEffect(() => {
-    window.workshop.getRecentProjects().then(setRecent)
-    window.workshop.getSettings().then(setSettings)
+    let cancelled = false
+
+    async function restoreWindowState() {
+      try {
+        const [recentProjects, savedSettings, currentProject] = await Promise.all([
+          window.workshop.getRecentProjects(),
+          window.workshop.getSettings(),
+          window.workshop.getProject(),
+        ])
+        if (cancelled) return
+
+        setRecent(recentProjects)
+        setSettings(savedSettings)
+        if (currentProject.ok && currentProject.data) {
+          setProject(currentProject.data)
+          setFlowStep(suggestedStep(currentProject.data))
+          setViewGeneration('current')
+          setPage('generate')
+        }
+      } catch (e) {
+        if (!cancelled) showError(e instanceof Error ? e.message : '恢复应用状态失败')
+      }
+    }
+
+    void restoreWindowState()
+    return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
@@ -259,6 +283,29 @@ function App() {
     } catch (e) { showError(e instanceof Error ? e.message : '图片上传失败') }
     finally { setBusy('') }
   }
+  async function importImageReferencePackage() {
+    setBusy('import-image-reference-package'); setError('')
+    try {
+      const result = await window.workshop.importImageReferencePackage()
+      if (result.data) setProject(result.data)
+      if (!result.ok) { showError(result.error); return }
+      const imported = result.imported || 0
+      const skipped = result.skipped || 0
+      flash(imported
+        ? `已导入 ${imported} 张图片并复用原有标签${skipped ? `，跳过 ${skipped} 张重复图片` : ''}`
+        : skipped ? `素材包中的 ${skipped} 张图片已存在，未重复导入` : '素材包中没有可导入的图片')
+    } catch (e) { showError(e instanceof Error ? e.message : '图片素材包导入失败') }
+    finally { setBusy('') }
+  }
+  async function exportImageReferencePackage() {
+    setBusy('export-image-reference-package'); setError('')
+    try {
+      const result = await window.workshop.exportImageReferencePackage()
+      if (!result.ok) { showError(result.error); return }
+      if (result.savedPath) flash(`已导出 ${result.exported || 0} 张图片及其标签`)
+    } catch (e) { showError(e instanceof Error ? e.message : '图片素材包导出失败') }
+    finally { setBusy('') }
+  }
   async function retagImageReference(id: string) {
     await run(`retag-image-reference-${id}`, () => window.workshop.retagImageReference(id), '图片标签已更新')
   }
@@ -349,7 +396,7 @@ function App() {
           exportImageSet={async (taskId) => { const result = await window.workshop.exportImageSet(taskId); if (!result.ok) showError(result.error); else if (result.savedPath) flash('整套图片已导出') }}
           goReferenceLibrary={() => { setPage('assets'); setAssetTab('imageReferences') }}
         />}
-        {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} exportMaterial={exportMaterial} downloadAssetTemplate={downloadAssetTemplate} importAssetBatch={importAssetBatch} exportAsset={exportAsset} busy={busy} referenceProgress={referenceProgress} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={(kind, id, enabled) => run('toggle-asset', () => window.workshop.toggleAsset(kind, id, enabled))} uploadImageReferences={uploadImageReferences} retagImageReference={retagImageReference} setImageReferenceRole={setImageReferenceRole} toggleImageReference={toggleImageReference} deleteImageReference={deleteImageReference} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
+        {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} exportMaterial={exportMaterial} downloadAssetTemplate={downloadAssetTemplate} importAssetBatch={importAssetBatch} exportAsset={exportAsset} busy={busy} referenceProgress={referenceProgress} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={(kind, id, enabled) => run('toggle-asset', () => window.workshop.toggleAsset(kind, id, enabled))} uploadImageReferences={uploadImageReferences} importImageReferencePackage={importImageReferencePackage} exportImageReferencePackage={exportImageReferencePackage} retagImageReference={retagImageReference} setImageReferenceRole={setImageReferenceRole} toggleImageReference={toggleImageReference} deleteImageReference={deleteImageReference} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
         {page === 'settings' && <SettingsPage settings={settings} setSettings={setSettings} save={saveSettings} busy={busy} />}
       </main>
 
@@ -823,13 +870,14 @@ function GenerationActivity({ stream, busy, project, thinkingEnabled }: { stream
   return <section className="generation-activity" aria-live="polite"><div className="activity-head"><span><LoaderCircle className="spin" size={16} /></span><div><b>{isThinking ? '正在思考' : busy === 'facts' ? '正在核对业务事实' : '正在生成内容策略'}</b><small>{isThinking ? '正在理解输入并规划输出结构' : `已完成 ${labels.length} ${noun}${conflicts.length ? `，识别 ${conflicts.length} 处冲突` : ''}`}</small></div></div><ol className="activity-log" ref={activityLogRef}>{!isThinking && <li className="done"><Check size={13} /><span>{base.replace('正在', '已').replace('…', '')}</span></li>}{labels.map((label, index) => <li className="done" key={`${label}-${index}`}><Check size={13} /><span>{busy === 'facts' ? `已整理第 ${index + 1} 组：${label}` : `已形成第 ${index + 1} 条：${label}`}</span></li>)}{conflicts.map((label, index) => <li className="done" key={`conflict-${label}-${index}`}><Check size={13} /><span>已识别第 {index + 1} 处口径冲突：{label}</span></li>)}<li className="active"><LoaderCircle className="spin" size={13} /><span>{activeText}</span></li></ol>{thinkingEnabled && <ThoughtTrace content={thinking} />}</section>
 }
 
-function AssetsPage({ project, chooseFolder, importMaterial, exportMaterial, downloadAssetTemplate, importAssetBatch, exportAsset, busy, referenceProgress, tab, setTab, openAsset, deleteAsset, toggleAsset, uploadImageReferences, retagImageReference, setImageReferenceRole, toggleImageReference, deleteImageReference, goGenerate }: {
+function AssetsPage({ project, chooseFolder, importMaterial, exportMaterial, downloadAssetTemplate, importAssetBatch, exportAsset, busy, referenceProgress, tab, setTab, openAsset, deleteAsset, toggleAsset, uploadImageReferences, importImageReferencePackage, exportImageReferencePackage, retagImageReference, setImageReferenceRole, toggleImageReference, deleteImageReference, goGenerate }: {
   project: ProjectData | null; chooseFolder: () => void; importMaterial: () => void; exportMaterial: () => void;
   downloadAssetTemplate: (kind: BatchAssetKind) => void; importAssetBatch: (kind: BatchAssetKind) => void; exportAsset: (kind: AssetKind) => void;
   busy: string; referenceProgress: ImageReferenceProgressEvent | null; tab: AssetLibraryTab; setTab: (tab: AssetLibraryTab) => void;
   openAsset: (kind: AssetKind, item?: Keyword | Rule | Reference) => void;
   deleteAsset: (kind: AssetKind, id: string) => void; toggleAsset: (kind: AssetKind, id: string, enabled: boolean) => Promise<boolean>; goGenerate: () => void;
   uploadImageReferences: (isCover: boolean) => void; retagImageReference: (id: string) => void;
+  importImageReferencePackage: () => void; exportImageReferencePackage: () => void;
   setImageReferenceRole: (id: string, isCover: boolean) => void; toggleImageReference: (id: string, enabled: boolean) => void; deleteImageReference: (id: string) => void;
 }) {
   const labels: Record<AssetLibraryTab, string> = { keywords: '关键词', references: '参考文案', rules: '合规准则', imageReferences: '小红书图片' }
@@ -841,10 +889,10 @@ function AssetsPage({ project, chooseFolder, importMaterial, exportMaterial, dow
   }
   const standardTab = tab === 'imageReferences' ? null : tab
   const items = project && standardTab ? project[standardTab] : []
-  return <div className="page-content"><PageHeader title="素材管理" action={project && <button className="primary" onClick={goGenerate}><WandSparkles size={17} />前往文案生成</button>}>维护业务事实来源、文案参考和优秀图片样本；生成时只读取当前生效的素材。</PageHeader>{!project ? <ProjectEmpty recent={[]} openRecent={() => undefined} chooseFolder={chooseFolder} /> : <><section className={`material-card surface-card ${project.material.exists ? 'ready' : ''}`}><span className="large-icon"><FileText size={25} /></span><div><span>业务原始素材</span><h2>{project.material.exists ? '业务原始素材.md' : '尚未导入 Markdown 文件'}</h2><p>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 更新后可重新提取业务事实` : '请先将 PDF 和图片完整转换为 Markdown'}</p></div><div className="material-actions"><button className="secondary compact" onClick={exportMaterial} disabled={!project.material.exists || !!busy}>{busy === 'export-material' ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={importMaterial} disabled={!!busy}>{busy === 'material' ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}{project.material.exists ? '替换文件' : '导入文件'}</button></div></section><section className="asset-library surface-card"><div className="asset-tabs">{(Object.keys(labels) as AssetLibraryTab[]).map((key) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{labels[key]}<span>{counts[key][0]}/{counts[key][1]}</span></button>)}</div>{tab === 'imageReferences' ? <ImageReferenceLibrary items={project.imageReferences} busy={busy} progress={referenceProgress} upload={uploadImageReferences} retag={retagImageReference} setRole={setImageReferenceRole} toggle={toggleImageReference} remove={deleteImageReference} /> : <><div className="asset-toolbar"><div><h2>{labels[tab]}</h2><p>支持手动维护、Excel 批量导入与完整导出。关闭“生效”后，该行不会拼接进模型提示词。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={() => exportAsset(tab)} disabled={!!busy}>{busy === `export-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={() => downloadAssetTemplate(tab)} disabled={!!busy}>{busy === `template-${tab}` ? <LoaderCircle className="spin" size={16} /> : <LayoutTemplate size={16} />}下载模板</button><button className="secondary compact" onClick={() => importAssetBatch(tab)} disabled={!!busy}>{busy === `import-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}批量导入</button><button className="primary compact" onClick={() => openAsset(tab)} disabled={!!busy}><Plus size={16} />新增{tab === 'rules' ? '准则' : labels[tab]}</button></div></div>{items.length === 0 ? <div className="compact-empty tall"><Archive size={25} /><b>还没有{labels[tab]}</b><span>可新增单条记录，也可下载模板后批量导入。</span></div> : <AssetTable kind={tab} items={items} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={toggleAsset} />}</>}</section></>}</div>
+  return <div className="page-content"><PageHeader title="素材管理" action={project && <button className="primary" onClick={goGenerate}><WandSparkles size={17} />前往文案生成</button>}>维护业务事实来源、文案参考和优秀图片样本；生成时只读取当前生效的素材。</PageHeader>{!project ? <ProjectEmpty recent={[]} openRecent={() => undefined} chooseFolder={chooseFolder} /> : <><section className={`material-card surface-card ${project.material.exists ? 'ready' : ''}`}><span className="large-icon"><FileText size={25} /></span><div><span>业务原始素材</span><h2>{project.material.exists ? '业务原始素材.md' : '尚未导入 Markdown 文件'}</h2><p>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 更新后可重新提取业务事实` : '请先将 PDF 和图片完整转换为 Markdown'}</p></div><div className="material-actions"><button className="secondary compact" onClick={exportMaterial} disabled={!project.material.exists || !!busy}>{busy === 'export-material' ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={importMaterial} disabled={!!busy}>{busy === 'material' ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}{project.material.exists ? '替换文件' : '导入文件'}</button></div></section><section className="asset-library surface-card"><div className="asset-tabs">{(Object.keys(labels) as AssetLibraryTab[]).map((key) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{labels[key]}<span>{counts[key][0]}/{counts[key][1]}</span></button>)}</div>{tab === 'imageReferences' ? <ImageReferenceLibrary items={project.imageReferences} busy={busy} progress={referenceProgress} upload={uploadImageReferences} importPackage={importImageReferencePackage} exportPackage={exportImageReferencePackage} retag={retagImageReference} setRole={setImageReferenceRole} toggle={toggleImageReference} remove={deleteImageReference} /> : <><div className="asset-toolbar"><div><h2>{labels[tab]}</h2><p>支持手动维护、Excel 批量导入与完整导出。关闭“生效”后，该行不会拼接进模型提示词。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={() => exportAsset(tab)} disabled={!!busy}>{busy === `export-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={() => downloadAssetTemplate(tab)} disabled={!!busy}>{busy === `template-${tab}` ? <LoaderCircle className="spin" size={16} /> : <LayoutTemplate size={16} />}下载模板</button><button className="secondary compact" onClick={() => importAssetBatch(tab)} disabled={!!busy}>{busy === `import-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}批量导入</button><button className="primary compact" onClick={() => openAsset(tab)} disabled={!!busy}><Plus size={16} />新增{tab === 'rules' ? '准则' : labels[tab]}</button></div></div>{items.length === 0 ? <div className="compact-empty tall"><Archive size={25} /><b>还没有{labels[tab]}</b><span>可新增单条记录，也可下载模板后批量导入。</span></div> : <AssetTable kind={tab} items={items} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={toggleAsset} />}</>}</section></>}</div>
 }
 
-function ImageReferenceLibrary({ items, busy, progress, upload, retag, setRole, toggle, remove }: { items: ImageReference[]; busy: string; progress: ImageReferenceProgressEvent | null; upload: (isCover: boolean) => void; retag: (id: string) => void; setRole: (id: string, isCover: boolean) => void; toggle: (id: string, enabled: boolean) => void; remove: (id: string) => void }) {
+function ImageReferenceLibrary({ items, busy, progress, upload, importPackage, exportPackage, retag, setRole, toggle, remove }: { items: ImageReference[]; busy: string; progress: ImageReferenceProgressEvent | null; upload: (isCover: boolean) => void; importPackage: () => void; exportPackage: () => void; retag: (id: string) => void; setRole: (id: string, isCover: boolean) => void; toggle: (id: string, enabled: boolean) => void; remove: (id: string) => void }) {
   const [sources, setSources] = useState<Record<string, string>>({})
   useEffect(() => {
     let active = true
@@ -855,7 +903,7 @@ function ImageReferenceLibrary({ items, busy, progress, upload, retag, setRole, 
     return () => { active = false }
   }, [items])
   const importing = busy.startsWith('upload-image-reference-') && progress && progress.phase !== 'done'
-  return <><div className="asset-toolbar image-reference-toolbar"><div><h2>小红书图片参考库</h2><p>上传你认为优秀的配图并标明页面类型。视觉模型会识别摄影实景、混合排版与纯图形样本；Qwen Image 只借鉴视觉方法，不复制样本事实。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={() => upload(false)} disabled={!!busy}>{busy === 'upload-image-reference-content' ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}上传内容页</button><button className="primary compact" onClick={() => upload(true)} disabled={!!busy}>{busy === 'upload-image-reference-cover' ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}上传封面</button></div></div>{importing && <div className="reference-import-progress" aria-live="polite"><span className="reference-import-pulse"><Sparkles size={17} /></span><div><b>{progress.label}</b><small>图片已进入素材库，分析结果会逐张补全</small></div><strong>{progress.current}/{progress.total}</strong><div className="generation-meter"><i style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} /></div></div>}{items.length === 0 ? <div className="image-reference-empty"><div className="reference-empty-frame"><ImageIcon size={32} /></div><div><h3>用好样本教会模型什么是“像小红书”</h3><p>建议先上传 3–6 张封面和 3–6 张内容页。系统会分析摄影/图形媒介、场景、光线、构图、文字布局与配色。</p></div></div> : <div className="image-reference-grid">{items.map((item) => {
+  return <><div className="asset-toolbar image-reference-toolbar"><div><h2>小红书图片参考库</h2><p>上传优秀配图自动打标，或通过素材包分享图片和完整标签；导入素材包无需重复调用视觉模型。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={exportPackage} disabled={!!busy || !items.length}>{busy === 'export-image-reference-package' ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出素材包</button><button className="secondary compact" onClick={importPackage} disabled={!!busy}>{busy === 'import-image-reference-package' ? <LoaderCircle className="spin" size={16} /> : <PackageOpen size={16} />}批量导入</button><button className="secondary compact" onClick={() => upload(false)} disabled={!!busy}>{busy === 'upload-image-reference-content' ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}上传内容页</button><button className="primary compact" onClick={() => upload(true)} disabled={!!busy}>{busy === 'upload-image-reference-cover' ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}上传封面</button></div></div>{importing && <div className="reference-import-progress" aria-live="polite"><span className="reference-import-pulse"><Sparkles size={17} /></span><div><b>{progress.label}</b><small>图片已进入素材库，分析结果会逐张补全</small></div><strong>{progress.current}/{progress.total}</strong><div className="generation-meter"><i style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} /></div></div>}{items.length === 0 ? <div className="image-reference-empty"><div className="reference-empty-frame"><ImageIcon size={32} /></div><div><h3>用好样本教会模型什么是“像小红书”</h3><p>建议先上传 3–6 张封面和 3–6 张内容页。也可以导入别人分享的素材包，直接复用已经完成的视觉标签。</p></div></div> : <div className="image-reference-grid">{items.map((item) => {
     const activeBusy = busy.endsWith(item.id)
     return <article key={item.id} className={`image-reference-card ${item.enabled ? '' : 'disabled'} ${item.taggingStatus}`}><div className="reference-preview">{sources[item.id] ? <img src={sources[item.id]} alt={item.tags.summary || item.originalName} /> : <span><LoaderCircle className="spin" size={20} /></span>}<b>{item.isCover ? '封面样本' : '内容页样本'}</b><code>{item.id}</code></div><div className="reference-card-copy"><div className="reference-card-head"><div><h3>{item.tags.summary || item.originalName}</h3><span>{item.width} × {item.height}</span></div><label className="switch" title={item.enabled ? '点击停用' : '点击生效'}><input type="checkbox" checked={item.enabled} onChange={(event) => toggle(item.id, event.target.checked)} disabled={!!busy} /><span /></label></div>{item.taggingStatus === 'ready' ? <><p>{[item.tags.visualStyle, item.tags.composition, item.tags.textLayout].filter(Boolean).join(' · ')}</p><div className="reference-use-cases"><span>{item.tags.visualMedium === 'photo' ? '摄影实景' : item.tags.visualMedium === 'mixed' ? '实景＋设计' : '图形设计'}</span>{item.tags.useCases.slice(0, 3).map((value) => <span key={value}>{value}</span>)}</div><div className="reference-keywords">{item.tags.keywords.slice(0, 5).map((value) => <small key={value}>#{value}</small>)}</div></> : item.taggingStatus === 'failed' ? <div className="reference-tag-error"><b>自动打标失败</b><span>{item.taggingError}</span></div> : <div className="reference-tagging"><LoaderCircle className="spin" size={15} /><span>正在分析视觉结构</span></div>}<div className="reference-card-actions"><button className="text-button" onClick={() => setRole(item.id, !item.isCover)} disabled={!!busy}>{activeBusy ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}改为{item.isCover ? '内容页' : '封面'}</button><button className="text-button" onClick={() => retag(item.id)} disabled={!!busy}><Sparkles size={14} />重新打标</button><button className="icon-button danger" onClick={() => remove(item.id)} disabled={!!busy} title="删除参考图片"><Trash2 size={14} /></button></div></div></article>
   })}</div>}</>

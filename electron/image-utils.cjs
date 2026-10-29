@@ -13,15 +13,15 @@ const VISUAL_MODE_DESCRIPTIONS = {
 }
 
 const DEFAULT_IMAGE_SETTINGS = {
-  enabled: false,
+  enabled: true,
   protocol: 'dashscope',
-  baseUrl: '',
+  baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   apiKey: '',
   model: 'qwen-image-3.0-pro',
   size: '1080x1440',
   count: 1,
   promptExtendMode: 'direct',
-  enableThinking: true,
+  enableThinking: false,
   watermark: false,
 }
 
@@ -178,9 +178,9 @@ function buildNegativePrompt(rawBrief) {
 
 function normalizeImageSettings(value = {}) {
   return {
-    enabled: Boolean(value.enabled),
+    enabled: value.enabled !== false,
     protocol: value.protocol === 'openai' ? 'openai' : 'dashscope',
-    baseUrl: text(value.baseUrl),
+    baseUrl: text(value.baseUrl, DEFAULT_IMAGE_SETTINGS.baseUrl),
     apiKey: text(value.apiKey),
     model: text(value.model, DEFAULT_IMAGE_SETTINGS.model),
     size: /^\d+x\d+$/.test(text(value.size)) ? text(value.size) : DEFAULT_IMAGE_SETTINGS.size,
@@ -188,7 +188,7 @@ function normalizeImageSettings(value = {}) {
     count: 1,
     // Qwen Image I2I 不支持 agent 提示词增强，图生图链路固定使用 direct。
     promptExtendMode: 'direct',
-    enableThinking: value.enableThinking !== false,
+    enableThinking: value.enableThinking === true,
     watermark: Boolean(value.watermark),
   }
 }

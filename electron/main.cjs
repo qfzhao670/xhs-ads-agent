@@ -22,6 +22,11 @@ const {
   sanitizeImageBrief,
   sanitizeImageReferenceTags,
 } = require('./image-utils.cjs')
+const {
+  createImageReferencePackage,
+  imageHash,
+  readImageReferencePackage,
+} = require('./image-reference-package.cjs')
 
 const MARKER = '小红书运营工坊.json'
 const DATA_DIR = '项目数据'
@@ -932,6 +937,119 @@ ipcMain.handle('image-reference:delete', async (_event, id) => {
     await saveImageReferences(items)
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('image-reference:export-package', async () => {
+  try {
+    if (!currentRoot) throw new Error('请先创建或打开项目')
+    const items = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
+    if (!items.length) throw new Error('图片素材库为空，无法导出')
+    const meta = await readMeta()
+    const safeProjectName = String(meta?.name || cleanName(currentRoot)).replace(/[\\/:*?"<>|]/g, '-').slice(0, 40)
+    const result = await dialog.showSaveDialog({
+      title: '导出小红书图片素材包',
+      defaultPath: `${safeProjectName}-图片素材包-${now().slice(0, 10)}.zip`,
+      filters: [{ name: '小红书图片素材包', extensions: ['zip'] }],
+    })
+    if (result.canceled || !result.filePath) return { ok: true }
+
+    const entries = []
+    for (const reference of items) {
+      const source = resolveProjectFile(reference.relativePath)
+      if (!await exists(source)) throw new Error(`图片文件不存在，无法导出：${reference.originalName || reference.id}`)
+      entries.push({
+        reference,
+        buffer: await fsp.readFile(source),
+        extension: path.extname(source),
+      })
+    }
+    const packageBuffer = createImageReferencePackage(entries)
+    await fsp.writeFile(result.filePath, packageBuffer)
+    return { ok: true, exported: entries.length, savedPath: result.filePath }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('image-reference:import-package', async () => {
+  const createdFiles = []
+  let committed = false
+  try {
+    if (!currentRoot) throw new Error('请先创建或打开项目')
+    const result = await dialog.showOpenDialog({
+      title: '导入小红书图片素材包',
+      buttonLabel: '导入并复用标签',
+      properties: ['openFile'],
+      filters: [{ name: '小红书图片素材包', extensions: ['zip'] }],
+    })
+    if (result.canceled || !result.filePaths[0]) return { ok: false, error: '' }
+    const source = result.filePaths[0]
+    const stat = await fsp.stat(source)
+    if (stat.size > 300 * 1024 * 1024) throw new Error('素材包超过 300MB，无法导入')
+    const { entries } = readImageReferencePackage(await fsp.readFile(source))
+
+    const items = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
+    const existingHashes = new Set()
+    for (const item of items) {
+      try {
+        const file = resolveProjectFile(item.relativePath)
+        if (await exists(file)) existingHashes.add(imageHash(await fsp.readFile(file)))
+      } catch { /* A broken existing item should not prevent importing the rest of the package. */ }
+    }
+
+    const meta = await readMeta()
+    meta.counters = meta.counters || {}
+    const highestExistingId = items.reduce((highest, item) => {
+      const match = /^XHSIMG-(\d+)$/.exec(item.id)
+      return Math.max(highest, match ? Number(match[1]) : 0)
+    }, 0)
+    meta.counters.imageReferences = Math.max(Number(meta.counters.imageReferences) || 0, highestExistingId)
+    let skipped = 0
+    const importedItems = []
+    for (const entry of entries) {
+      if (existingHashes.has(entry.sha256)) { skipped += 1; continue }
+      const dimensions = nativeImage.createFromBuffer(entry.buffer).getSize()
+      if (!dimensions.width || !dimensions.height) throw new Error(`${entry.reference.originalName || entry.reference.file} 不是可读取的图片`)
+      if (dimensions.width > 8000 || dimensions.height > 8000 || Math.max(dimensions.width, dimensions.height) / Math.min(dimensions.width, dimensions.height) > 10) {
+        throw new Error(`${entry.reference.originalName || entry.reference.file} 的尺寸不符合要求（边长不超过 8000，长宽比不超过 10:1）`)
+      }
+
+      meta.counters.imageReferences = (meta.counters.imageReferences || 0) + 1
+      const id = `XHSIMG-${String(meta.counters.imageReferences).padStart(4, '0')}`
+      const target = dataPath(path.join(IMAGE_REFERENCES_DIR, `${id}${entry.extension}`))
+      await fsp.mkdir(path.dirname(target), { recursive: true })
+      await fsp.writeFile(target, entry.buffer, { flag: 'wx' })
+      createdFiles.push(target)
+      const sourceStatus = entry.reference.taggingStatus
+      const imported = normalizeImageReference({
+        id,
+        originalName: path.basename(String(entry.reference.originalName || `${id}${entry.extension}`)),
+        relativePath: projectRelative(target),
+        width: dimensions.width,
+        height: dimensions.height,
+        isCover: Boolean(entry.reference.isCover),
+        enabled: entry.reference.enabled !== false,
+        taggingStatus: sourceStatus === 'ready' ? 'ready' : 'failed',
+        taggingError: sourceStatus === 'ready' ? '' : String(entry.reference.taggingError || '源素材尚未完成打标，请重新打标'),
+        tags: sanitizeImageReferenceTags(entry.reference.tags),
+        createdAt: now(),
+        updatedAt: now(),
+      })
+      items.push(imported)
+      importedItems.push(imported)
+      existingHashes.add(entry.sha256)
+    }
+
+    if (importedItems.length) {
+      await writeMeta(meta)
+      await saveImageReferences(items)
+    }
+    committed = true
+    return { ok: true, imported: importedItems.length, skipped, data: await loadProject() }
+  } catch (error) {
+    if (!committed) for (const file of createdFiles) {
+      try { if (await exists(file)) await fsp.unlink(file) } catch { /* Best-effort rollback for newly created package files. */ }
+    }
+    return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined }
+  }
 })
 
 ipcMain.handle('settings:get', async () => (await userConfig()).value)

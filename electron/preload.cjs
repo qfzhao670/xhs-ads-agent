@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('workshop', {
   importAssetBatch: (kind) => ipcRenderer.invoke('asset:import', kind),
   exportAsset: (kind) => ipcRenderer.invoke('asset:export', kind),
   uploadImageReferences: (isCover) => ipcRenderer.invoke('image-reference:upload', isCover),
+  importImageReferencePackage: () => ipcRenderer.invoke('image-reference:import-package'),
+  exportImageReferencePackage: () => ipcRenderer.invoke('image-reference:export-package'),
   retagImageReference: (id) => ipcRenderer.invoke('image-reference:retag', id),
   setImageReferenceRole: (id, isCover) => ipcRenderer.invoke('image-reference:set-role', id, isCover),
   toggleImageReference: (id, enabled) => ipcRenderer.invoke('image-reference:toggle', id, enabled),
