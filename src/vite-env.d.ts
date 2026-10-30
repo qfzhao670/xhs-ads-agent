@@ -27,13 +27,17 @@ interface Window {
     readClipboardText(): Promise<string>
     saveSettings(settings: ModelSettings): Promise<ApiResult>
     extractFacts(resolution: string | undefined, thinking: boolean): Promise<ApiResult>
+    configureGeneration(mode: ContentMode, userBriefRaw: string): Promise<ApiResult>
     generateStrategies(thinking: boolean): Promise<ApiResult>
     selectStrategy(ids: string[], strategyAdvice: Record<string, string>): Promise<ApiResult>
     startNewGeneration(): Promise<ApiResult>
+    deleteGeneration(id: string): Promise<ApiResult>
     generateDraft(thinking: boolean): Promise<ApiResult>
     reviseDraft(request: string, version: number, thinking: boolean): Promise<ApiResult>
     saveManualDraft(draft: { version: number; title: string; body: string; hashtags: string }): Promise<ApiResult>
     confirmDraft(version: number): Promise<ApiResult>
+    archiveFinal(version: number, force?: boolean): Promise<ApiResult>
+    removeFinalContent(id: string): Promise<ApiResult>
     createImageSet(version: number): Promise<ApiResult>
     regenerateImagePage(taskId: string, pageId: string, feedback: string): Promise<ApiResult>
     readGeneratedImage(relativePath: string): Promise<ApiResult>
@@ -47,7 +51,7 @@ interface Window {
 
 type AssetKind = 'keywords' | 'references' | 'rules'
 type BatchAssetKind = AssetKind
-type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; exported?: number; skipped?: number; failed?: number; savedPath?: string; imageUrl?: string }
+type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; exported?: number; skipped?: number; failed?: number; savedPath?: string; imageUrl?: string; duplicateId?: string; archivedId?: string }
 type ImageModelSettings = {
   enabled: boolean; protocol: 'dashscope' | 'openai'; baseUrl: string; apiKey: string; model: string; size: string; count: number;
   promptExtendMode: 'agent' | 'direct'; enableThinking: boolean; watermark: boolean
@@ -86,8 +90,25 @@ type ImageReference = {
 }
 type Conflict = { topic: string; versions: string[]; question: string }
 type Facts = { confirmedFacts: { category: string; items: string[] }[]; promotionalExpressions: string[]; conflicts: Conflict[]; generatedAt: string }
-type Strategy = { id: string; name: string; angle: string; materialPoints: string[]; route: string; referenceIds: string[]; bestFor: string }
-type Draft = { version: number; title: string; body: string; hashtags: string[]; strategyId: string; referenceIds: string[]; revisionRequest: string; createdAt: string; confirmed: boolean }
+type ContentMode = 'explicit' | 'native'
+type GenerationConfig = { mode: ContentMode | ''; userBriefRaw: string; updatedAt: string }
+type StrategySnapshot = { targetAudience?: string; triggerMoment?: string; coreQuestion?: string; readerValue?: string; businessBridge?: string; route?: string; [key: string]: unknown }
+type Strategy = {
+  id: string; mode?: ContentMode; name: string; angle: string; targetAudience?: string; triggerMoment?: string; coreQuestion?: string;
+  readerValue?: string; businessBridge?: string; materialPoints: string[]; creativeContexts?: string[]; searchPhrases?: string[];
+  route: string; productExposure?: 'light' | 'clear'; referenceIds: string[]; differenceFromArchive?: string; mustNotInclude?: string[]; bestFor: string
+}
+type Draft = {
+  version: number; title: string; body: string; hashtags: string[]; strategyId: string; referenceIds: string[]; revisionRequest: string;
+  strategySnapshot?: StrategySnapshot; instructionReport?: { followed?: string[]; overrodeStrategy?: boolean; notFollowed?: { instruction: string; reason: string }[] };
+  createdAt: string; confirmed: boolean
+}
+type FinalContent = {
+  id: string; mode: ContentMode; status: 'archived' | 'removed'; generationId: string; draftVersion: number; strategyId: string;
+  title: string; body: string; hashtags: string[]; strategySnapshot: StrategySnapshot; userInstructionsRaw: string[]; factIds: string[];
+  referenceIds: string[]; imageTaskId: string; imagePaths: string[]; textHash: string; duplicateOverride: boolean;
+  archivedAt: string; removedAt: string | null
+}
 type ImageBrief = {
   purpose: string; coverTitle: string; subtitle: string; style: 'lifestyle' | 'event' | 'product' | 'guide' | 'editorial';
   visualMode: 'photoreal' | 'mixed' | 'graphic';
@@ -110,12 +131,13 @@ type GenerationRecord = {
   id: string; createdAt: string; archivedAt: string; strategies: Strategy[];
   selectedStrategyIds?: string[]; selectedStrategyId: string; strategyAdvice?: Record<string, string>; advice: string; drafts: Draft[];
   material?: ProjectData['material']; keywords?: Keyword[]; references?: Reference[]; rules?: Rule[]; facts?: Facts | null
-  imageTasks?: ImageTask[]
+  imageTasks?: ImageTask[]; generationConfig?: GenerationConfig
 }
 type ProjectData = {
   meta: { name: string; root: string; createdAt: string; updatedAt: string }
   material: { exists: boolean; name: string; content: string }
-  keywords: Keyword[]; references: Reference[]; rules: Rule[]; imageReferences: ImageReference[]
+  keywords: Keyword[]; references: Reference[]; rules: Rule[]; imageReferences: ImageReference[]; finalContents: FinalContent[]
+  generationConfig: GenerationConfig
   facts: Facts | null; strategies: Strategy[]; selectedStrategyIds: string[]; selectedStrategyId: string; strategyAdvice: Record<string, string>; advice: string
   drafts: Draft[]; currentDraft: Draft | null; imageTasks: ImageTask[]
   currentGeneration: { id: string; createdAt: string }

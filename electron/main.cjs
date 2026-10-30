@@ -34,6 +34,8 @@ const OUTPUT_DIR = '生成结果'
 const IMAGE_TASKS_FILE = '配图记录.json'
 const IMAGE_REFERENCES_FILE = '小红书图片参考库.json'
 const IMAGE_REFERENCES_DIR = '小红书图片参考库'
+const GENERATION_CONFIG_FILE = '生成配置.json'
+const FINAL_CONTENTS_FILE = '终稿内容库.json'
 let currentRoot = ''
 
 const assetFiles = {
@@ -60,6 +62,38 @@ async function readMeta(root = currentRoot) { return readJson(path.join(root, MA
 async function writeMeta(meta) {
   meta.updatedAt = now()
   await writeJson(path.join(currentRoot, MARKER), meta)
+}
+function normalizeContentMode(value) { return value === 'explicit' || value === 'native' ? value : '' }
+function normalizeGenerationConfig(value = {}) {
+  return {
+    mode: normalizeContentMode(value.mode),
+    userBriefRaw: String(value.userBriefRaw || '').trim(),
+    updatedAt: String(value.updatedAt || ''),
+  }
+}
+function normalizedText(value) {
+  return String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase()
+}
+function finalTextHash(title, body, hashtags = []) {
+  return crypto.createHash('sha256').update(normalizedText(`${title}\n${body}\n${hashtags.join(' ')}`)).digest('hex')
+}
+function normalizeFinalContent(value = {}) {
+  return {
+    ...value,
+    id: String(value.id || ''),
+    mode: normalizeContentMode(value.mode) || 'explicit',
+    status: value.status === 'removed' ? 'removed' : 'archived',
+    title: String(value.title || ''),
+    body: String(value.body || ''),
+    hashtags: Array.isArray(value.hashtags) ? value.hashtags.map(String) : [],
+    strategySnapshot: value.strategySnapshot && typeof value.strategySnapshot === 'object' ? value.strategySnapshot : {},
+    userInstructionsRaw: Array.isArray(value.userInstructionsRaw) ? value.userInstructionsRaw.map(String) : [],
+    factIds: Array.isArray(value.factIds) ? value.factIds.map(String) : [],
+    referenceIds: Array.isArray(value.referenceIds) ? value.referenceIds.map(String) : [],
+    imagePaths: Array.isArray(value.imagePaths) ? value.imagePaths.map(String) : [],
+    textHash: String(value.textHash || finalTextHash(value.title, value.body, value.hashtags)),
+    duplicateOverride: Boolean(value.duplicateOverride),
+  }
 }
 function cleanName(folder) { return path.basename(folder).trim() || '未命名项目' }
 function applicationIconPath() {
@@ -92,7 +126,9 @@ async function loadProject() {
   const references = (await readJson(dataPath(assetFiles.references), [])).map((item) => normalizeAsset('references', item))
   const rules = (await readJson(dataPath(assetFiles.rules), [])).map((item) => normalizeAsset('rules', item))
   const imageReferences = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
+  const finalContents = (await readJson(dataPath(FINAL_CONTENTS_FILE), [])).map(normalizeFinalContent)
   const facts = await readJson(outputPath('业务事实.json'), null)
+  const generationConfig = normalizeGenerationConfig(await readJson(outputPath(GENERATION_CONFIG_FILE), {}))
   const strategies = await readJson(outputPath('策略候选.json'), [])
   const selection = await readJson(outputPath('策略选择.json'), { selectedStrategyIds: [], selectedStrategyId: '', strategyAdvice: {}, advice: '' })
   const drafts = await readJson(outputPath('终稿版本.json'), [])
@@ -109,7 +145,7 @@ async function loadProject() {
       name: materialExists ? '业务原始素材.md' : '',
       content: materialExists ? await fsp.readFile(materialFile, 'utf8') : '',
     },
-    keywords, references, rules, imageReferences, facts, strategies,
+    keywords, references, rules, imageReferences, finalContents, facts, generationConfig, strategies,
     selectedStrategyIds: Array.isArray(selection.selectedStrategyIds)
       ? selection.selectedStrategyIds
       : selection.selectedStrategyId ? [selection.selectedStrategyId] : [],
@@ -507,8 +543,10 @@ async function createImagePlan(project, draft, onChunk = () => {}) {
 7. visualMode 只能从 photoreal、mixed、graphic 中选择：photoreal=全幅摄影级实景，mixed=至少 60% 实景底图加少量编辑排版，graphic=纯信息设计/插画。style 只能从 lifestyle、event、product、guide、editorial 中选择。palette、mustShow、mustAvoid 是简短字符串数组。
 8. 你必须只根据下方“参考图片文字标签”判断每一页最适合参考哪些样本，并为每页填写 1–3 个 referenceImageIds。实景页必须优先选择 visualMedium=photo 或 mixed 的样本，并将它放在 referenceImageIds 第一位；封面优先选择 isCover=true，内容页优先选择 isCover=false；相关性比数量重要。
 9. 参考样本只用于借鉴版式、构图、配色、字体气质、摄影媒介、光线和视觉节奏。不得把样本中的人物、商品、品牌、文字、地点或业务信息写进页面策划。页面内容只能来自本篇业务事实与文案。
+10. 配图只表达这篇已确认文案实际采用的选题，不得因为项目业务事实很多，就在图片中补回文案没有使用的产品总纲、价格、流程或权益。生活化种草的封面优先表达生活问题、场景或情绪，不默认制作产品海报。
 
 业务事实：${JSON.stringify(project.facts)}
+内容模式：${project.generationConfig.mode || strategy?.mode || 'explicit'}
 选定策略：${JSON.stringify(strategy)}
 已确认文案：${JSON.stringify(draft)}
 合规准则：${JSON.stringify(rules)}
@@ -598,7 +636,8 @@ function modelStreamDone(event, operation) {
   event.sender.send('model:stream', { operation, done: true, chunk: '' })
 }
 
-const modelSystem = '你是严谨的小红书文案工作流引擎。只根据用户提供的信息工作，不得补充、猜测或虚构任何业务事实。必须只输出合法 JSON，不要输出 Markdown 代码块或解释。'
+const modelSystem = `你是严谨的小红书内容策划与写作引擎。不得补充、猜测或虚构产品、服务、价格、行程、权益、资质、名额、效果、联系方式等业务事实。可以扩展稳定的公共背景、生活场景、用户问题、情绪和创意表达，但必须与业务承诺区分，不得伪造亲身体验或把想象写成客户已经提供的服务。在真实性与合规硬边界内，用户当前自然语言要求是最高优先级创作指令，优先于选定策略、关键词、参考文案、历史习惯和系统默认模板。必须只输出合法 JSON，不要输出 Markdown 代码块或解释。`
+const factsModelSystem = '你是严谨的业务事实提取引擎。本任务只能提取和整理用户原始素材中明确包含的内容，不得补充公共背景、常识、创意场景、推测或任何素材中没有的业务事实。必须只输出合法 JSON，不要输出 Markdown 代码块或解释。'
 
 async function initializeProject(folder) {
   const absolute = path.resolve(folder)
@@ -607,15 +646,17 @@ async function initializeProject(folder) {
   await fsp.mkdir(path.join(absolute, OUTPUT_DIR), { recursive: true })
   const meta = {
     schemaVersion: 1, name: cleanName(absolute), createdAt: now(), updatedAt: now(),
-    counters: { keywords: 0, references: 0, rules: 0, imageReferences: 0, strategies: 0, generations: 1 },
+    counters: { keywords: 0, references: 0, rules: 0, imageReferences: 0, strategies: 0, generations: 1, finalContents: 0 },
   }
   await writeJson(path.join(absolute, MARKER), meta)
   for (const file of Object.values(assetFiles)) await writeJson(path.join(absolute, DATA_DIR, file), [])
   await writeJson(path.join(absolute, DATA_DIR, IMAGE_REFERENCES_FILE), [])
+  await writeJson(path.join(absolute, DATA_DIR, FINAL_CONTENTS_FILE), [])
   await fsp.mkdir(path.join(absolute, DATA_DIR, IMAGE_REFERENCES_DIR), { recursive: true })
   currentRoot = absolute
   await writeJson(outputPath('当前生成.json'), { id: 'GEN-0001', createdAt: now() })
   await writeJson(outputPath('生成记录.json'), [])
+  await writeJson(outputPath(GENERATION_CONFIG_FILE), normalizeGenerationConfig())
   await writeJson(outputPath(IMAGE_TASKS_FILE), [])
   await addRecent(absolute)
   return loadProject()
@@ -1084,7 +1125,7 @@ ipcMain.handle('workflow:facts', async (event, resolution = '', thinking = true)
     if (!project?.material.exists) throw new Error('请先导入业务原始素材.md')
     const previous = project.facts?.conflicts?.length ? project.facts.conflicts : []
     const prompt = `请开放式提取并整理以下业务素材中的事实。可能关注产品、人群、场景、卖点、服务、流程、价格、时间、地点、名额、资质、安全、权益和限制，但这些不是必填字段；素材有什么就提取什么，不要把未提及内容判断为缺失。区分可确认事实、宣传性表达和冲突事实。\n\n${resolution ? `上次发现的冲突：${JSON.stringify(previous)}\n用户确认的统一口径：${resolution}\n请重新生成消除冲突后的完整业务事实。\n\n` : ''}原始素材：\n${project.material.content}\n\n输出对象格式：{"confirmedFacts":[{"category":"实际类别","items":["事实"]}],"promotionalExpressions":["表达"],"conflicts":[{"topic":"事项","versions":["口径1","口径2"],"question":"询问用户的简短明确问题"}]}`
-    const result = await callModel(modelSystem, prompt, modelStream(event, operation), thinking)
+    const result = await callModel(factsModelSystem, prompt, modelStream(event, operation), thinking)
     const facts = {
       confirmedFacts: Array.isArray(result.confirmedFacts) ? result.confirmedFacts : [],
       promotionalExpressions: Array.isArray(result.promotionalExpressions) ? result.promotionalExpressions : [],
@@ -1097,13 +1138,72 @@ ipcMain.handle('workflow:facts', async (event, resolution = '', thinking = true)
   } catch (error) { modelStreamDone(event, operation); return { ok: false, error: error.message } }
 })
 
+ipcMain.handle('workflow:configure', async (_event, payload = {}) => {
+  try {
+    const project = await loadProject()
+    if (!project?.facts || project.facts.conflicts?.length) throw new Error('请先形成无冲突的完整业务事实')
+    const mode = normalizeContentMode(payload.mode)
+    if (!mode) throw new Error('请选择显式宣传或生活化种草')
+    const previousMode = project.generationConfig.mode
+    const previousBrief = project.generationConfig.userBriefRaw
+    const generationConfig = normalizeGenerationConfig({ mode, userBriefRaw: payload.userBriefRaw, updatedAt: now() })
+    await writeJson(outputPath(GENERATION_CONFIG_FILE), generationConfig)
+    const downstreamChanged = previousMode && (previousMode !== mode || previousBrief !== generationConfig.userBriefRaw)
+    if (downstreamChanged && (project.strategies.length || project.drafts.length)) {
+      await writeJson(outputPath('策略候选.json'), [])
+      await writeJson(outputPath('策略选择.json'), { selectedStrategyIds: [], selectedStrategyId: '', strategyAdvice: {}, advice: '' })
+      await writeJson(outputPath('终稿版本.json'), [])
+      await writeJson(outputPath(IMAGE_TASKS_FILE), [])
+    }
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
 ipcMain.handle('workflow:strategies', async (event, thinking = false) => {
   const operation = 'strategies'
   try {
     const project = await loadProject()
     if (!project?.facts || project.facts.conflicts?.length) throw new Error('请先形成无冲突的完整业务事实')
+    const mode = project.generationConfig.mode
+    if (!mode) throw new Error('请先选择本轮内容模式')
     const assets = assetMarkdownTables(project)
-    const prompt = `根据完整业务事实和项目现有资产，一次性理解全部输入并生成 3–5 个彼此明显不同的文案策略。每个策略只引用真正适合的 1–3 篇参考文案，上限 3 篇；没有合适参考时使用空数组。referenceIds 只能使用给出的稳定编号。每个策略务必简短。\n\n业务事实：${JSON.stringify(project.facts)}\n\n## 关键词库\n\n${assets.keywords}\n\n## 参考文案库\n\n${assets.references}\n\n## 合规准则\n\n${assets.rules}\n\n输出对象格式：{"strategies":[{"name":"策略名称","angle":"一句话核心切入角度","materialPoints":["素材点，2–4个"],"route":"一句话写作路线","referenceIds":["REF-0001"],"bestFor":"最适合的目标"}]}`
+    const sameModeArchive = project.finalContents.filter((item) => item.status === 'archived' && item.mode === mode).slice(-80).map((item) => ({
+      id: item.id,
+      title: item.title,
+      targetAudience: item.strategySnapshot.targetAudience || '',
+      triggerMoment: item.strategySnapshot.triggerMoment || '',
+      coreQuestion: item.strategySnapshot.coreQuestion || '',
+      readerValue: item.strategySnapshot.readerValue || '',
+      businessBridge: item.strategySnapshot.businessBridge || '',
+      route: item.strategySnapshot.route || item.strategySnapshot.narrativeFrame || '',
+    }))
+    const modeContract = mode === 'native'
+      ? `当前模式是“生活化种草”。每个策略必须只解决一个具体生活问题，提供独立于产品的阅读价值，默认只承接 1 个业务点、最多 2 个；默认不写价格、联系方式、完整行程、报名流程和强转化 CTA。产品不必出现在标题，正文先讲生活问题，再自然连接业务。不得伪装素人或虚构第一人称体验。`
+      : `当前模式是“显式宣传”。可以明确出现产品或服务名称，也可以使用较高信息密度，但每个策略仍须有一条清晰主线，不能机械罗列全部资料。`
+    const prompt = `${modeContract}
+
+## 用户当前自然语言要求（最高创作优先级）
+${project.generationConfig.userBriefRaw || '用户未补充要求'}
+
+请根据业务事实和项目资产生成 3–5 个彼此明显不同的微选题策略。允许围绕地点、季节、生活时刻、用户疑问、情绪和稳定公共背景进行创意发散，但不得把发散内容写成客户已经提供的产品、服务或行程。每个策略只引用真正适合的 1–3 篇参考文案；没有合适参考时使用空数组。referenceIds 只能使用给出的稳定编号。
+
+## 同模式已入库内容
+以下内容已经使用过。不要再次生成“目标人群 + 核心问题 + 业务承接方式”完全一致的策略：
+${sameModeArchive.length ? JSON.stringify(sameModeArchive) : '暂无已入库内容'}
+
+## 已确认业务事实
+${JSON.stringify(project.facts)}
+
+## 关键词库
+${assets.keywords}
+
+## 参考文案库
+${assets.references}
+
+## 合规准则
+${assets.rules}
+
+输出对象格式：{"strategies":[{"name":"策略名称","angle":"一句话核心切入角度","targetAudience":"写给谁","triggerMoment":"什么时刻或场景","coreQuestion":"这篇只解决什么问题","readerValue":"读者能得到什么","businessBridge":"产品或业务如何自然出现","materialPoints":["实际使用的业务素材点"],"creativeContexts":["可扩展的生活背景或创意场景"],"searchPhrases":["自然搜索短语"],"route":"一句话写作路线","productExposure":"light|clear","referenceIds":["REF-0001"],"differenceFromArchive":"与已入库内容的具体差异","mustNotInclude":["本策略默认不写的内容"]}]}`
     const result = await callModel(modelSystem, prompt, modelStream(event, operation), thinking)
     const raw = Array.isArray(result.strategies) ? result.strategies.slice(0, 5) : []
     if (raw.length < 3) throw new Error('模型返回的有效策略少于 3 个，请重试')
@@ -1114,10 +1214,21 @@ ipcMain.handle('workflow:strategies', async (event, thinking = false) => {
       return {
         id: `STR-${String(meta.counters.strategies).padStart(4, '0')}`,
         name: String(item.name || '未命名策略'), angle: String(item.angle || ''),
+        mode,
+        targetAudience: String(item.targetAudience || ''),
+        triggerMoment: String(item.triggerMoment || ''),
+        coreQuestion: String(item.coreQuestion || item.angle || ''),
+        readerValue: String(item.readerValue || ''),
+        businessBridge: String(item.businessBridge || ''),
         materialPoints: Array.isArray(item.materialPoints) ? item.materialPoints.slice(0, 4).map(String) : [],
+        creativeContexts: Array.isArray(item.creativeContexts) ? item.creativeContexts.slice(0, 5).map(String) : [],
+        searchPhrases: Array.isArray(item.searchPhrases) ? item.searchPhrases.slice(0, 5).map(String) : [],
         route: String(item.route || ''),
+        productExposure: item.productExposure === 'clear' ? 'clear' : 'light',
         referenceIds: Array.isArray(item.referenceIds) ? item.referenceIds.filter((id) => validRefs.has(id)).slice(0, 3) : [],
-        bestFor: String(item.bestFor || ''), createdAt: now(),
+        differenceFromArchive: String(item.differenceFromArchive || ''),
+        mustNotInclude: Array.isArray(item.mustNotInclude) ? item.mustNotInclude.slice(0, 6).map(String) : [],
+        bestFor: String(item.bestFor || item.readerValue || ''), createdAt: now(),
       }
     })
     await writeMeta(meta)
@@ -1155,6 +1266,7 @@ ipcMain.handle('workflow:new', async () => {
         references: project.references,
         rules: project.rules,
         facts: project.facts,
+        generationConfig: project.generationConfig,
         strategies: project.strategies,
         selectedStrategyIds: project.selectedStrategyIds,
         selectedStrategyId: project.selectedStrategyId,
@@ -1171,10 +1283,24 @@ ipcMain.handle('workflow:new', async () => {
     const currentGeneration = { id: `GEN-${String(meta.counters.generations).padStart(4, '0')}`, createdAt: now() }
     await writeMeta(meta)
     await writeJson(outputPath('当前生成.json'), currentGeneration)
+    await writeJson(outputPath(GENERATION_CONFIG_FILE), normalizeGenerationConfig())
     await writeJson(outputPath('策略候选.json'), [])
     await writeJson(outputPath('策略选择.json'), { selectedStrategyIds: [], selectedStrategyId: '', strategyAdvice: {}, advice: '' })
     await writeJson(outputPath('终稿版本.json'), [])
     await writeJson(outputPath(IMAGE_TASKS_FILE), [])
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('generation:delete', async (_event, id) => {
+  try {
+    const project = await loadProject()
+    if (!project) throw new Error('请先创建或打开项目')
+    const targetId = String(id || '').trim()
+    if (!targetId) throw new Error('请指定要删除的生成记录')
+    if (targetId === project.currentGeneration.id) throw new Error('当前生成轮次不能删除，请先新建一轮生成')
+    if (!project.generationHistory.some((record) => record.id === targetId)) throw new Error('没有找到这条生成记录')
+    await writeJson(outputPath('生成记录.json'), project.generationHistory.filter((record) => record.id !== targetId))
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
 })
@@ -1188,15 +1314,48 @@ async function makeDraft(event, revisionRequest = '', baseVersion = null, thinki
   const strategyIds = baseDraft ? [baseDraft.strategyId] : project.selectedStrategyIds
   const strategies = strategyIds.map((id) => project.strategies.find((item) => item.id === id)).filter(Boolean)
   if (!strategies.length) throw new Error('所选策略已不存在')
+  const mode = project.generationConfig.mode || strategies[0]?.mode || 'explicit'
+  const archiveExclusions = project.finalContents.filter((item) => item.status === 'archived' && item.mode === mode).slice(-40).map((item) => ({
+    id: item.id, title: item.title, strategySnapshot: item.strategySnapshot,
+  }))
   const drafts = [...project.drafts]
   for (const [index, strategy] of strategies.entries()) {
     const selectedReferences = project.references.filter((item) => item.enabled !== false && strategy.referenceIds.includes(item.id))
     const assets = assetMarkdownTables(project, selectedReferences)
     const base = revisionRequest && baseDraft
-      ? `请在保持同一策略的前提下修改当前终稿。\n当前终稿：${JSON.stringify(baseDraft)}\n新的修改要求：${revisionRequest}`
-      : '请根据选定策略直接生成一篇独立终稿。'
+      ? `请根据用户最新修改要求更新当前文案。用户最新要求优先于当前文案、原策略、参考文案和系统默认写法。如果最新要求改变人群、角度、结构、卖点或内容模式，允许改变策略并返回更新后的 strategySnapshot，不要为了维持原策略而削弱用户要求。\n当前终稿：${JSON.stringify(baseDraft)}\n用户最新修改要求：${revisionRequest}`
+      : '请根据选定微策略直接生成一篇独立终稿。'
     const strategyAdvice = project.strategyAdvice?.[strategy.id] || project.advice || '无'
-    const prompt = `${base}\n\n只能使用以下业务事实：${JSON.stringify(project.facts)}\n选定策略：${JSON.stringify(strategy)}\n该策略的补充要求：${strategyAdvice}\n\n## 关键词库\n\n${assets.keywords}\n\n## 合规准则\n\n${assets.rules}\n\n## 只可参考以下已选中的完整参考文案\n\n${assets.references}\n\n遵循策略的核心主题和信息取舍；关键词自然融入，不机械堆砌；参考文案只模仿选题方式、钩子、结构、节奏和语感，不复制原句或业务信息；遵守合规准则。输出对象格式：{"title":"标题","body":"正文","hashtags":["话题标签，不含#"]}`
+    const modeContract = mode === 'native'
+      ? '生活化种草模式：只围绕一个具体生活问题展开，先提供独立内容价值，再自然连接一至两个已确认业务点；默认不写完整产品介绍、价格、联系方式、完整行程、报名流程或强转化 CTA。标题不强制出现产品名。不得虚构亲身体验。'
+      : '显式宣传模式：可以明确介绍产品或服务，但必须保持单一主线，避免把全部业务事实机械堆入一篇文案。'
+    const prompt = `${base}
+
+## 硬边界
+只能把以下内容作为业务事实：${JSON.stringify(project.facts)}
+${modeContract}
+
+## 用户自然语言要求（最高创作优先级）
+本轮总体要求：${project.generationConfig.userBriefRaw || '无'}
+该策略补充要求：${strategyAdvice}
+${revisionRequest ? `本次最新修改要求：${revisionRequest}` : ''}
+
+## 本轮任务
+选定策略：${JSON.stringify(strategy)}
+
+## 同模式已入库内容（避免自动重复）
+${archiveExclusions.length ? JSON.stringify(archiveExclusions) : '暂无'}
+
+## 关键词库
+${assets.keywords}
+
+## 合规准则
+${assets.rules}
+
+## 只可参考以下已选中的完整参考文案
+${assets.references}
+
+用户当前要求优先于策略、关键词和参考文案。关键词自然融入，不机械堆砌；参考文案只模仿选题方法、结构、节奏和语感，不复制原句或业务信息。如果用户要求与事实或合规硬边界冲突，不得编造，并在 instructionReport.notFollowed 中说明。输出对象格式：{"title":"标题","body":"正文","hashtags":["话题标签，不含#"],"strategySnapshot":{"targetAudience":"最终目标人群","triggerMoment":"最终触发时刻","coreQuestion":"最终核心问题","readerValue":"最终读者收益","businessBridge":"最终业务承接方式","route":"最终写作路线"},"instructionReport":{"followed":["已执行要求"],"overrodeStrategy":false,"notFollowed":[{"instruction":"未执行要求","reason":"原因"}]}}`
     const operation = `draft:${strategy.id}:${index + 1}/${strategies.length}`
     const result = await callModel(modelSystem, prompt, modelStream(event, operation), thinking)
     if (!result.title || !result.body) throw new Error('模型返回的终稿缺少标题或正文，请重试')
@@ -1204,7 +1363,13 @@ async function makeDraft(event, revisionRequest = '', baseVersion = null, thinki
     const draft = {
       version, title: String(result.title).trim(), body: String(result.body).trim(),
       hashtags: Array.isArray(result.hashtags) ? result.hashtags.map((tag) => String(tag).replace(/^#/, '').trim()).filter(Boolean) : [],
-      strategyId: strategy.id, referenceIds: strategy.referenceIds, revisionRequest, createdAt: now(), confirmed: false,
+      strategyId: strategy.id, referenceIds: strategy.referenceIds, revisionRequest,
+      strategySnapshot: result.strategySnapshot && typeof result.strategySnapshot === 'object' ? result.strategySnapshot : {
+        targetAudience: strategy.targetAudience || '', triggerMoment: strategy.triggerMoment || '', coreQuestion: strategy.coreQuestion || strategy.angle || '',
+        readerValue: strategy.readerValue || '', businessBridge: strategy.businessBridge || '', route: strategy.route || '',
+      },
+      instructionReport: result.instructionReport && typeof result.instructionReport === 'object' ? result.instructionReport : { followed: [], overrodeStrategy: false, notFollowed: [] },
+      createdAt: now(), confirmed: false,
     }
     for (let draftIndex = 0; draftIndex < drafts.length; draftIndex += 1) {
       if (drafts[draftIndex].strategyId === strategy.id) drafts[draftIndex] = { ...drafts[draftIndex], confirmed: false }
@@ -1256,6 +1421,62 @@ ipcMain.handle('workflow:confirm', async (_event, version) => {
     const markdown = `# ${draft.title}\n\n${draft.body}\n\n${draft.hashtags.map((tag) => `#${tag}`).join(' ')}\n`
     await fsp.writeFile(outputPath(`${project.currentGeneration.id}_最终输出_v${draft.version}.md`), markdown, 'utf8')
     await fsp.writeFile(outputPath('最终输出.md'), markdown, 'utf8')
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('workflow:archive-final', async (_event, version, force = false) => {
+  try {
+    const project = await loadProject()
+    const draft = project?.drafts.find((item) => item.version === Number(version) && item.confirmed)
+    if (!draft) throw new Error('请先确认这篇文案，再执行入库')
+    const mode = project.generationConfig.mode || project.strategies.find((item) => item.id === draft.strategyId)?.mode
+    if (!mode) throw new Error('这篇文案缺少内容模式，请先重新选择模式并生成')
+    const active = project.finalContents.filter((item) => item.status === 'archived')
+    const existingVersion = active.find((item) => item.generationId === project.currentGeneration.id && item.draftVersion === draft.version)
+    if (existingVersion) return { ok: true, data: project, archivedId: existingVersion.id }
+    const textHash = finalTextHash(draft.title, draft.body, draft.hashtags)
+    const duplicate = active.find((item) => item.mode === mode && item.textHash === textHash)
+    if (duplicate && !force) return { ok: false, error: `这篇文字与已入库内容 ${duplicate.id} 完全一致`, duplicateId: duplicate.id }
+    const strategy = project.strategies.find((item) => item.id === draft.strategyId) || {}
+    const task = project.imageTasks.find((item) => item.draftVersion === draft.version && item.strategyId === draft.strategyId)
+    const imagePaths = task?.plan?.pages?.map((page) => task.images.find((image) => image.id === task.currentImageIds?.[page.id])?.relativePath).filter(Boolean) || []
+    const meta = await readMeta()
+    meta.counters = meta.counters || {}
+    meta.counters.finalContents = (Number(meta.counters.finalContents) || 0) + 1
+    const item = normalizeFinalContent({
+      id: `FINAL-${String(meta.counters.finalContents).padStart(4, '0')}`,
+      mode,
+      status: 'archived',
+      generationId: project.currentGeneration.id,
+      draftVersion: draft.version,
+      strategyId: draft.strategyId,
+      title: draft.title,
+      body: draft.body,
+      hashtags: draft.hashtags,
+      strategySnapshot: { ...strategy, ...(draft.strategySnapshot || {}) },
+      userInstructionsRaw: [project.generationConfig.userBriefRaw, project.strategyAdvice?.[draft.strategyId], draft.revisionRequest].filter(Boolean),
+      referenceIds: draft.referenceIds,
+      imageTaskId: task?.id || '',
+      imagePaths,
+      textHash,
+      duplicateOverride: Boolean(force),
+      archivedAt: now(),
+      removedAt: null,
+    })
+    await writeMeta(meta)
+    await writeJson(dataPath(FINAL_CONTENTS_FILE), [...project.finalContents, item])
+    return { ok: true, data: await loadProject(), archivedId: item.id }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('final-content:remove', async (_event, id) => {
+  try {
+    const project = await loadProject()
+    const targetId = String(id || '')
+    if (!project?.finalContents.some((item) => item.id === targetId && item.status === 'archived')) throw new Error('没有找到这条已入库内容')
+    const items = project.finalContents.map((item) => item.id === targetId ? { ...item, status: 'removed', removedAt: now() } : item)
+    await writeJson(dataPath(FINAL_CONTENTS_FILE), items)
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
 })
