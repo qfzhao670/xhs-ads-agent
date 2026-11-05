@@ -8,6 +8,9 @@ interface Window {
     openRecentProject(folder: string): Promise<ApiResult>
     getRecentProjects(): Promise<string[]>
     importMaterial(): Promise<ApiResult>
+    selectMaterialFiles(): Promise<MaterialFileSelectionResult>
+    getPathForFile(file: File): string
+    extractMaterial(filePaths: string[]): Promise<ApiResult>
     exportMaterial(): Promise<ApiResult>
     getProject(): Promise<ApiResult>
     saveAsset(kind: AssetKind, value: Record<string, string>): Promise<ApiResult>
@@ -52,6 +55,8 @@ interface Window {
 type AssetKind = 'keywords' | 'references' | 'rules'
 type BatchAssetKind = AssetKind
 type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; exported?: number; skipped?: number; failed?: number; savedPath?: string; imageUrl?: string; duplicateId?: string; archivedId?: string }
+type MaterialUploadFile = { name: string; path: string; size: number }
+type MaterialFileSelectionResult = { ok: boolean; error?: string; files?: MaterialUploadFile[] }
 type ImageModelSettings = {
   enabled: boolean; protocol: 'dashscope' | 'openai'; baseUrl: string; apiKey: string; model: string; size: string; count: number;
   promptExtendMode: 'agent' | 'direct'; enableThinking: boolean; watermark: boolean

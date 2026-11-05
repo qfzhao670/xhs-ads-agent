@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive, BookOpenText, Brain, Check, CheckCircle2, ChevronDown, ChevronRight,
   Circle, ClipboardPaste, Download, Eye, EyeOff, FileText, FolderOpen, Image as ImageIcon, ImagePlus, KeyRound, LayoutTemplate, LoaderCircle,
@@ -9,6 +9,8 @@ import {
 type Page = 'generate' | 'library' | 'assets' | 'settings'
 type Modal = 'project-init' | AssetKind | null
 type AssetLibraryTab = AssetKind | 'imageReferences'
+
+const MarkdownReadingView = lazy(() => import('./MarkdownReadingView'))
 
 const flowSteps = [
   ['准备素材', '确认本次生成依据'],
@@ -75,6 +77,8 @@ function App() {
   const [stream, setStream] = useState({ operation: '', content: '', thinking: '', done: false })
   const [imageProgress, setImageProgress] = useState<Record<string, ImageProgressEvent>>({})
   const [referenceProgress, setReferenceProgress] = useState<ImageReferenceProgressEvent | null>(null)
+  const [materialFiles, setMaterialFiles] = useState<MaterialUploadFile[]>([])
+  const [materialUploadOpen, setMaterialUploadOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -138,6 +142,7 @@ function App() {
   }, [project?.meta.root, project?.selectedStrategyIds, project?.selectedStrategyId, project?.strategyAdvice, project?.currentDraft?.version, project?.generationConfig.mode, project?.generationConfig.userBriefRaw])
 
   useEffect(() => setImageProgress({}), [project?.meta.root, project?.currentGeneration.id])
+  useEffect(() => { setMaterialFiles([]); setMaterialUploadOpen(false) }, [project?.meta.root])
 
   useEffect(() => window.workshop.onModelStream((payload) => {
     setStream((current) => {
@@ -237,7 +242,7 @@ function App() {
   }
   async function run(label: string, action: () => Promise<ApiResult>, success?: string) {
     setBusy(label); setError('')
-    if (['facts', 'strategies', 'draft', 'revise'].includes(label)) setStream({ operation: label, content: '', thinking: '', done: false })
+    if (['material-ai', 'facts', 'strategies', 'draft', 'revise'].includes(label)) setStream({ operation: label, content: '', thinking: '', done: false })
     try {
       const result = await action()
       if (result.data) setProject(result.data)
@@ -269,6 +274,47 @@ function App() {
     setProject(result.data); setFlowStep(suggestedStep(result.data)); setViewGeneration('current'); setPage('generate')
   }
   async function importMaterial() { await run('material', () => window.workshop.importMaterial(), '原始素材已更新') }
+  function appendMaterialFiles(incoming: MaterialUploadFile[]) {
+    if (!incoming.length) { showError('没有读取到可添加的文件'); return }
+    const supported = /\.(pdf|png|jpe?g|webp|gif)$/i
+    const invalid = incoming.find((file) => !file.path || !supported.test(file.name))
+    if (invalid) { showError(`不支持的文件格式：${invalid.name || '未知文件'}`); return }
+    const oversized = incoming.find((file) => file.size <= 0 || file.size > 50 * 1024 * 1024)
+    if (oversized) { showError(oversized.size <= 0 ? `文件为空：${oversized.name}` : `文件超过 50MB：${oversized.name}`); return }
+    setMaterialFiles((current) => {
+      const paths = new Set(current.map((file) => file.path))
+      const next = [...current]
+      for (const file of incoming) {
+        if (paths.has(file.path)) continue
+        paths.add(file.path)
+        next.push(file)
+      }
+      if (next.length > 20) { showError('一次最多添加 20 个文件'); return current }
+      if (next.reduce((total, file) => total + file.size, 0) > 50 * 1024 * 1024) { showError('待提取文件合计不能超过 50MB'); return current }
+      setError('')
+      return next
+    })
+  }
+  async function selectMaterialFiles() {
+    setError('')
+    try {
+      const result = await window.workshop.selectMaterialFiles()
+      if (!result.ok) { showError(result.error); return }
+      appendMaterialFiles(result.files || [])
+    } catch (e) { showError(e instanceof Error ? e.message : '选择文件失败') }
+  }
+  function addDroppedMaterialFiles(files: File[]) {
+    try {
+      appendMaterialFiles(files.map((file) => ({ name: file.name, size: file.size, path: window.workshop.getPathForFile(file) })))
+    } catch (e) { showError(e instanceof Error ? e.message : '无法读取拖入的文件') }
+  }
+  function removeMaterialFile(filePath: string) { setMaterialFiles((current) => current.filter((file) => file.path !== filePath)) }
+  async function extractMaterial() {
+    if (!materialFiles.length) { showError('请先添加要提取的 PDF 或图片'); return }
+    setMaterialUploadOpen(false)
+    const ok = await run('material-ai', () => window.workshop.extractMaterial(materialFiles.map((file) => file.path)), 'AI 已提取并更新原始素材')
+    if (ok) setMaterialFiles([])
+  }
   async function exportMaterial() {
     const ok = await run('export-material', () => window.workshop.exportMaterial())
     if (ok) flash('业务原始素材已导出')
@@ -476,11 +522,13 @@ function App() {
           archiveFinal={archiveFinal}
         />}
         {page === 'library' && <FinalLibraryPage project={project} chooseFolder={chooseFolder} remove={removeFinalContent} />}
-        {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} exportMaterial={exportMaterial} downloadAssetTemplate={downloadAssetTemplate} importAssetBatch={importAssetBatch} exportAsset={exportAsset} busy={busy} referenceProgress={referenceProgress} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={(kind, id, enabled) => run('toggle-asset', () => window.workshop.toggleAsset(kind, id, enabled))} uploadImageReferences={uploadImageReferences} importImageReferencePackage={importImageReferencePackage} exportImageReferencePackage={exportImageReferencePackage} retagImageReference={retagImageReference} setImageReferenceRole={setImageReferenceRole} toggleImageReference={toggleImageReference} deleteImageReference={deleteImageReference} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
+        {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} materialFiles={materialFiles} selectMaterialFiles={() => setMaterialUploadOpen(true)} addDroppedMaterialFiles={addDroppedMaterialFiles} removeMaterialFile={removeMaterialFile} clearMaterialFiles={() => setMaterialFiles([])} extractMaterial={extractMaterial} exportMaterial={exportMaterial} downloadAssetTemplate={downloadAssetTemplate} importAssetBatch={importAssetBatch} exportAsset={exportAsset} busy={busy} referenceProgress={referenceProgress} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={(kind, id, enabled) => run('toggle-asset', () => window.workshop.toggleAsset(kind, id, enabled))} uploadImageReferences={uploadImageReferences} importImageReferencePackage={importImageReferencePackage} exportImageReferencePackage={exportImageReferencePackage} retagImageReference={retagImageReference} setImageReferenceRole={setImageReferenceRole} toggleImageReference={toggleImageReference} deleteImageReference={deleteImageReference} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
+        {page === 'assets' && busy === 'material-ai' && <OcrStreamPreview content={stream.operation === 'material-ai' ? stream.content : ''} fileCount={materialFiles.length} />}
         {page === 'settings' && <SettingsPage settings={settings} setSettings={setSettings} save={saveSettings} busy={busy} />}
       </main>
 
       <Overlays {...{ modal, setModal, pendingFolder, initialize, busy, error, setError, assetTab: assetTab === 'imageReferences' ? 'keywords' : assetTab, form, setForm, saveAsset }} />
+      {materialUploadOpen && <MaterialUploadModal files={materialFiles} selectFiles={selectMaterialFiles} addDroppedFiles={addDroppedMaterialFiles} removeFile={removeMaterialFile} clearFiles={() => setMaterialFiles([])} start={extractMaterial} close={() => setMaterialUploadOpen(false)} busy={busy} />}
       <Toast error={error} notice={notice} clear={() => setError('')} />
     </div>
   )
@@ -1014,8 +1062,52 @@ function FinalLibraryPage({ project, chooseFolder, remove }: { project: ProjectD
   </div>
 }
 
-function AssetsPage({ project, chooseFolder, importMaterial, exportMaterial, downloadAssetTemplate, importAssetBatch, exportAsset, busy, referenceProgress, tab, setTab, openAsset, deleteAsset, toggleAsset, uploadImageReferences, importImageReferencePackage, exportImageReferencePackage, retagImageReference, setImageReferenceRole, toggleImageReference, deleteImageReference, goGenerate }: {
-  project: ProjectData | null; chooseFolder: () => void; importMaterial: () => void; exportMaterial: () => void;
+function MaterialUploadModal({ files, selectFiles, addDroppedFiles, removeFile, clearFiles, start, close, busy }: {
+  files: MaterialUploadFile[]; selectFiles: () => void; addDroppedFiles: (files: File[]) => void; removeFile: (filePath: string) => void;
+  clearFiles: () => void; start: () => void; close: () => void; busy: string;
+}) {
+  const [dragging, setDragging] = useState(false)
+  const totalBytes = files.reduce((total, file) => total + file.size, 0)
+  return <div className="modal-backdrop material-upload-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close() }}>
+    <section className="material-upload-modal" role="dialog" aria-modal="true" aria-labelledby="material-upload-title">
+      <header className="material-upload-head"><div><span className="material-upload-mark"><WandSparkles size={19} /></span><div><h2 id="material-upload-title">AI 提取原始素材</h2><p>添加 PDF 或图片，确认后一次发送给视觉模型。</p></div></div><button className="icon-button" onClick={close} aria-label="关闭 AI 提取弹窗"><X size={18} /></button></header>
+      <div className="material-upload-body">
+        <div className={`material-modal-dropzone ${dragging ? 'dragging' : ''}`} role="button" tabIndex={0} onClick={selectFiles} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectFiles() } }} onDragEnter={(event) => { event.preventDefault(); setDragging(true) }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDragging(true) }} onDragLeave={(event) => { const next = event.relatedTarget; if (!(next instanceof Node) || !event.currentTarget.contains(next)) setDragging(false) }} onDrop={(event) => { event.preventDefault(); setDragging(false); addDroppedFiles(Array.from(event.dataTransfer.files)) }}>
+          <span className="material-modal-drop-icon"><Upload size={25} /></span><div><b>拖拽文件到这里</b><p>或点击此区域选择文件</p><small>支持 PDF、PNG、JPG、WEBP、GIF · 最多 20 个 · 合计不超过 50MB</small></div><span className="material-modal-browse">选择文件</span>
+        </div>
+        {files.length > 0 && <section className="material-file-section"><div className="material-file-section-head"><div><b>已添加 {files.length} 个文件</b><span>{formatFileSize(totalBytes)} / 50MB</span></div><button className="text-button" onClick={clearFiles}>清空</button></div><div className="material-file-cards">{files.map((file) => {
+          const isPdf = file.name.toLowerCase().endsWith('.pdf')
+          return <article className="material-file-card" key={file.path}><span className={`material-file-type ${isPdf ? 'pdf' : 'image'}`}>{isPdf ? <FileText size={18} /> : <ImageIcon size={18} />}</span><div><b title={file.name}>{file.name}</b><span>{isPdf ? 'PDF 文档' : '图片'} · {formatFileSize(file.size)}</span></div><button className="material-file-remove" onClick={() => removeFile(file.path)} aria-label={`删除 ${file.name}`} title="删除文件"><X size={14} /></button></article>
+        })}</div></section>}
+      </div>
+      <footer className="material-upload-actions"><span>{files.length ? 'AI 将按添加顺序读取并合并为一份 Markdown' : '添加文件后即可开始提取'}</span><div><button className="secondary" onClick={close}>取消</button><button className="primary" onClick={start} disabled={!files.length || !!busy}>{busy === 'material-ai' ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}开始提取{files.length ? `（${files.length}）` : ''}</button></div></footer>
+    </section>
+  </div>
+}
+
+function OcrStreamPreview({ content, fileCount }: { content: string; fileCount: number }) {
+  const [elapsed, setElapsed] = useState(0)
+  const renderedContent = useDeferredValue(content)
+  useEffect(() => {
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  let markdown = renderedContent.trimStart()
+  if (markdown.startsWith('```') && !markdown.includes('\n')) markdown = ''
+  else markdown = markdown.replace(/^```(?:markdown|md)?\s*\n/i, '').replace(/\n```\s*$/i, '')
+  const duration = elapsed < 60 ? `${elapsed} 秒` : `${Math.floor(elapsed / 60)} 分 ${elapsed % 60} 秒`
+  return <aside className="ocr-stream-panel" aria-label="OCR 实时提取结果">
+    <header><span className="ocr-stream-icon"><LoaderCircle className="spin" size={18} /></span><div><b>{content ? '正在生成业务原始素材' : `正在读取 ${fileCount} 个文件`}</b><span aria-live="polite">{content ? `已接收 ${content.length.toLocaleString()} 个字符 · ${duration}` : `等待模型返回首段内容 · ${duration}`}</span></div><span className="ocr-live-badge"><i />实时输出</span></header>
+    <div className="ocr-stream-meter"><i /></div>
+    <div className="ocr-reading-view">{markdown ? <Suspense fallback={<div className="ocr-waiting"><LoaderCircle className="spin" size={22} /><b>正在准备阅读视图</b></div>}><MarkdownReadingView markdown={markdown} /></Suspense> : <div className="ocr-waiting"><Sparkles size={24} /><b>模型正在理解 PDF 和图片</b><span>收到首段内容后，将在这里按 Markdown 阅读模式实时排版。</span></div>}</div>
+  </aside>
+}
+
+function AssetsPage({ project, chooseFolder, importMaterial, materialFiles, selectMaterialFiles, addDroppedMaterialFiles, removeMaterialFile, clearMaterialFiles, extractMaterial, exportMaterial, downloadAssetTemplate, importAssetBatch, exportAsset, busy, referenceProgress, tab, setTab, openAsset, deleteAsset, toggleAsset, uploadImageReferences, importImageReferencePackage, exportImageReferencePackage, retagImageReference, setImageReferenceRole, toggleImageReference, deleteImageReference, goGenerate }: {
+  project: ProjectData | null; chooseFolder: () => void; importMaterial: () => void; materialFiles: MaterialUploadFile[];
+  selectMaterialFiles: () => void; addDroppedMaterialFiles: (files: File[]) => void; removeMaterialFile: (filePath: string) => void; clearMaterialFiles: () => void;
+  extractMaterial: () => void; exportMaterial: () => void;
   downloadAssetTemplate: (kind: BatchAssetKind) => void; importAssetBatch: (kind: BatchAssetKind) => void; exportAsset: (kind: AssetKind) => void;
   busy: string; referenceProgress: ImageReferenceProgressEvent | null; tab: AssetLibraryTab; setTab: (tab: AssetLibraryTab) => void;
   openAsset: (kind: AssetKind, item?: Keyword | Rule | Reference) => void;
@@ -1024,6 +1116,7 @@ function AssetsPage({ project, chooseFolder, importMaterial, exportMaterial, dow
   importImageReferencePackage: () => void; exportImageReferencePackage: () => void;
   setImageReferenceRole: (id: string, isCover: boolean) => void; toggleImageReference: (id: string, enabled: boolean) => void; deleteImageReference: (id: string) => void;
 }) {
+  const [draggingMaterial, setDraggingMaterial] = useState(false)
   const labels: Record<AssetLibraryTab, string> = { keywords: '关键词', references: '参考文案', rules: '合规准则', imageReferences: '小红书图片' }
   const counts: Record<AssetLibraryTab, [number, number]> = {
     keywords: [project?.keywords.filter((item) => item.enabled).length || 0, project?.keywords.length || 0],
@@ -1033,7 +1126,8 @@ function AssetsPage({ project, chooseFolder, importMaterial, exportMaterial, dow
   }
   const standardTab = tab === 'imageReferences' ? null : tab
   const items = project && standardTab ? project[standardTab] : []
-  return <div className="page-content"><PageHeader title="素材管理" action={project && <button className="primary" onClick={goGenerate}><WandSparkles size={17} />前往文案生成</button>}>维护业务事实来源、文案参考和优秀图片样本；生成时只读取当前生效的素材。</PageHeader>{!project ? <ProjectEmpty recent={[]} openRecent={() => undefined} chooseFolder={chooseFolder} /> : <><section className={`material-card surface-card ${project.material.exists ? 'ready' : ''}`}><span className="large-icon"><FileText size={25} /></span><div><span>业务原始素材</span><h2>{project.material.exists ? '业务原始素材.md' : '尚未导入 Markdown 文件'}</h2><p>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 更新后可重新提取业务事实` : '请先将 PDF 和图片完整转换为 Markdown'}</p></div><div className="material-actions"><button className="secondary compact" onClick={exportMaterial} disabled={!project.material.exists || !!busy}>{busy === 'export-material' ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={importMaterial} disabled={!!busy}>{busy === 'material' ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}{project.material.exists ? '替换文件' : '导入文件'}</button></div></section><section className="asset-library surface-card"><div className="asset-tabs">{(Object.keys(labels) as AssetLibraryTab[]).map((key) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{labels[key]}<span>{counts[key][0]}/{counts[key][1]}</span></button>)}</div>{tab === 'imageReferences' ? <ImageReferenceLibrary items={project.imageReferences} busy={busy} progress={referenceProgress} upload={uploadImageReferences} importPackage={importImageReferencePackage} exportPackage={exportImageReferencePackage} retag={retagImageReference} setRole={setImageReferenceRole} toggle={toggleImageReference} remove={deleteImageReference} /> : <><div className="asset-toolbar"><div><h2>{labels[tab]}</h2><p>支持手动维护、Excel 批量导入与完整导出。关闭“生效”后，该行不会拼接进模型提示词。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={() => exportAsset(tab)} disabled={!!busy}>{busy === `export-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={() => downloadAssetTemplate(tab)} disabled={!!busy}>{busy === `template-${tab}` ? <LoaderCircle className="spin" size={16} /> : <LayoutTemplate size={16} />}下载模板</button><button className="secondary compact" onClick={() => importAssetBatch(tab)} disabled={!!busy}>{busy === `import-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}批量导入</button><button className="primary compact" onClick={() => openAsset(tab)} disabled={!!busy}><Plus size={16} />新增{tab === 'rules' ? '准则' : labels[tab]}</button></div></div>{items.length === 0 ? <div className="compact-empty tall"><Archive size={25} /><b>还没有{labels[tab]}</b><span>可新增单条记录，也可下载模板后批量导入。</span></div> : <AssetTable kind={tab} items={items} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={toggleAsset} />}</>}</section></>}</div>
+  const materialBytes = materialFiles.reduce((total, file) => total + file.size, 0)
+  return <div className="page-content"><PageHeader title="素材管理" action={project && <button className="primary" onClick={goGenerate}><WandSparkles size={17} />前往文案生成</button>}>维护业务事实来源、文案参考和优秀图片样本；生成时只读取当前生效的素材。</PageHeader>{!project ? <ProjectEmpty recent={[]} openRecent={() => undefined} chooseFolder={chooseFolder} /> : <><section className={`material-card surface-card ${project.material.exists ? 'ready' : ''}`}><div className="material-summary"><span className="large-icon"><FileText size={25} /></span><div><span>业务原始素材</span><h2>{project.material.exists ? '业务原始素材.md' : '尚未添加业务原始素材'}</h2><p>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 更新后可重新提取业务事实` : '可直接导入 Markdown，或用 AI 从 PDF / 图片提取'}</p></div><div className="material-actions"><button className="secondary compact" onClick={exportMaterial} disabled={!project.material.exists || !!busy}>{busy === 'export-material' ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={importMaterial} disabled={!!busy}>{busy === 'material' ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}{project.material.exists ? '替换 Markdown' : '导入 Markdown'}</button></div></div><div className={`material-dropzone ${draggingMaterial ? 'dragging' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDraggingMaterial(true) }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDraggingMaterial(true) }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDraggingMaterial(false) }} onDrop={(event) => { event.preventDefault(); setDraggingMaterial(false); addDroppedMaterialFiles(Array.from(event.dataTransfer.files)) }}><span className="material-drop-icon"><Upload size={20} /></span><div><b>拖拽 PDF 或图片到这里</b><span>可以一个个添加，也可以一次多选；全部添加后再调用 AI</span></div><button className="secondary compact" onClick={selectMaterialFiles} disabled={!!busy}><Plus size={15} />选择文件</button></div>{materialFiles.length > 0 && <div className="material-queue"><div className="material-queue-head"><div><b>待提取文件</b><span>{materialFiles.length}/20 个 · {formatFileSize(materialBytes)}/50MB</span></div><button className="text-button" onClick={clearMaterialFiles} disabled={!!busy}>清空列表</button></div><ol>{materialFiles.map((file, index) => <li key={file.path}><span className="material-file-index">{index + 1}</span><FileText size={16} /><div><b>{file.name}</b><span>{formatFileSize(file.size)}</span></div><button className="text-button" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => removeMaterialFile(file.path)} disabled={!!busy}><X size={15} /></button></li>)}</ol><div className="material-queue-actions"><span>AI 将按列表顺序读取，并合并生成一份业务原始素材</span><button className="primary" onClick={extractMaterial} disabled={!!busy}>{busy === 'material-ai' ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}{busy === 'material-ai' ? '正在提取' : `开始提取（${materialFiles.length} 个）`}</button></div></div>}</section><section className="asset-library surface-card"><div className="asset-tabs">{(Object.keys(labels) as AssetLibraryTab[]).map((key) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{labels[key]}<span>{counts[key][0]}/{counts[key][1]}</span></button>)}</div>{tab === 'imageReferences' ? <ImageReferenceLibrary items={project.imageReferences} busy={busy} progress={referenceProgress} upload={uploadImageReferences} importPackage={importImageReferencePackage} exportPackage={exportImageReferencePackage} retag={retagImageReference} setRole={setImageReferenceRole} toggle={toggleImageReference} remove={deleteImageReference} /> : <><div className="asset-toolbar"><div><h2>{labels[tab]}</h2><p>支持手动维护、Excel 批量导入与完整导出。关闭“生效”后，该行不会拼接进模型提示词。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={() => exportAsset(tab)} disabled={!!busy}>{busy === `export-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={() => downloadAssetTemplate(tab)} disabled={!!busy}>{busy === `template-${tab}` ? <LoaderCircle className="spin" size={16} /> : <LayoutTemplate size={16} />}下载模板</button><button className="secondary compact" onClick={() => importAssetBatch(tab)} disabled={!!busy}>{busy === `import-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}批量导入</button><button className="primary compact" onClick={() => openAsset(tab)} disabled={!!busy}><Plus size={16} />新增{tab === 'rules' ? '准则' : labels[tab]}</button></div></div>{items.length === 0 ? <div className="compact-empty tall"><Archive size={25} /><b>还没有{labels[tab]}</b><span>可新增单条记录，也可下载模板后批量导入。</span></div> : <AssetTable kind={tab} items={items} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={toggleAsset} />}</>}</section></>}</div>
 }
 
 function ImageReferenceLibrary({ items, busy, progress, upload, importPackage, exportPackage, retag, setRole, toggle, remove }: { items: ImageReference[]; busy: string; progress: ImageReferenceProgressEvent | null; upload: (isCover: boolean) => void; importPackage: () => void; exportPackage: () => void; retag: (id: string) => void; setRole: (id: string, isCover: boolean) => void; toggle: (id: string, enabled: boolean) => void; remove: (id: string) => void }) {
@@ -1098,7 +1192,7 @@ function SettingsPage({ settings, setSettings, save, busy }: { settings: ModelSe
   const imageEndpoint = resolvedImageEndpoint(settings.image)
   const incompatibleOpenAiDomain = settings.image.protocol === 'openai' && usesPublicDashScopeDomain(settings.image.baseUrl)
 
-  return <div className="page-content settings-page"><PageHeader title="设置">分别配置文案、视觉理解和图片生成模型。连接信息保存在本机应用数据中，不会写入项目目录。</PageHeader><div className="settings-stack"><section className="settings-card surface-card"><div className="settings-heading"><span className="large-icon"><KeyRound size={22} /></span><div><h2>文案与视觉理解模型</h2><p>用于文案工作流，并为上传的参考图片生成检索标签。</p></div><span className={`connection-badge ${settings.apiKey && settings.model ? 'ready' : ''}`}>{settings.apiKey && settings.model ? '已配置' : '待配置'}</span></div><div className="settings-form"><label className="field"><span>接口地址</span><input value={settings.baseUrl} onChange={(e) => setSettings({ ...settings, baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" /></label><div className="field"><label htmlFor="api-key">API Key</label><div className="secret-input"><input id="api-key" type={showApiKey ? 'text' : 'password'} value={settings.apiKey} onChange={(e) => setSettings({ ...settings, apiKey: e.target.value })} placeholder="sk-…" autoComplete="off" /><div className="secret-actions"><button type="button" onClick={() => setShowApiKey((visible) => !visible)} title={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'}>{showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}</button><button type="button" onClick={pasteApiKey} title="从剪贴板粘贴 API Key"><ClipboardPaste size={15} /><span>粘贴</span></button></div></div></div><label className="field"><span>文案模型</span><input value={settings.model} onChange={(e) => setSettings({ ...settings, model: e.target.value })} placeholder="例如 qwen-plus" /></label><label className="field"><span>视觉打标模型 <small>需支持图片理解</small></span><input value={settings.visionModel} onChange={(e) => setSettings({ ...settings, visionModel: e.target.value })} placeholder={settings.model || '例如 qwen-vl-max'} /><small className="field-hint">留空保存时沿用文案模型；如果文案模型不支持图片，请单独填写视觉模型。</small></label></div></section>
+  return <div className="page-content settings-page"><PageHeader title="设置">分别配置文案、视觉理解和图片生成模型。连接信息保存在本机应用数据中，不会写入项目目录。</PageHeader><div className="settings-stack"><section className="settings-card surface-card"><div className="settings-heading"><span className="large-icon"><KeyRound size={22} /></span><div><h2>文案与视觉理解模型</h2><p>用于文案工作流、PDF / 图片 OCR，以及参考图片检索标签。</p></div><span className={`connection-badge ${settings.apiKey && settings.model ? 'ready' : ''}`}>{settings.apiKey && settings.model ? '已配置' : '待配置'}</span></div><div className="settings-form"><label className="field"><span>接口地址</span><input value={settings.baseUrl} onChange={(e) => setSettings({ ...settings, baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" /></label><div className="field"><label htmlFor="api-key">API Key</label><div className="secret-input"><input id="api-key" type={showApiKey ? 'text' : 'password'} value={settings.apiKey} onChange={(e) => setSettings({ ...settings, apiKey: e.target.value })} placeholder="sk-…" autoComplete="off" /><div className="secret-actions"><button type="button" onClick={() => setShowApiKey((visible) => !visible)} title={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'}>{showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}</button><button type="button" onClick={pasteApiKey} title="从剪贴板粘贴 API Key"><ClipboardPaste size={15} /><span>粘贴</span></button></div></div></div><label className="field"><span>文案模型</span><input value={settings.model} onChange={(e) => setSettings({ ...settings, model: e.target.value })} placeholder="例如 qwen-plus" /></label><label className="field"><span>视觉理解 / OCR 模型 <small>需支持图片理解</small></span><input value={settings.visionModel} onChange={(e) => setSettings({ ...settings, visionModel: e.target.value })} placeholder={settings.model || '例如 qwen-vl-max'} /><small className="field-hint">用于 PDF / 图片转 Markdown 和图片打标；PDF 提取还要求当前兼容接口支持文件输入。</small></label></div></section>
     <section className={`settings-card image-settings-card surface-card ${settings.image.enabled ? 'enabled' : ''}`}>
       <div className="settings-heading"><span className="large-icon"><ImageIcon size={22} /></span><div><h2>图片模型</h2><p>只以图生图方式生成小红书 3:4 封面与内容套图，支持阿里云百炼 Qwen Image。</p></div><label className="settings-enable"><span>{settings.image.enabled ? '已启用' : '未启用'}</span><span className="switch"><input type="checkbox" checked={settings.image.enabled} onChange={(event) => setImage({ enabled: event.target.checked })} /><span /></span></label></div>
       {settings.image.enabled && <div className="settings-form">
@@ -1133,5 +1227,10 @@ function Toast({ error, notice, clear }: { error: string; notice: string; clear:
 }
 
 function formatTime(value: string) { return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) }
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes}B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)}KB`
+  return `${(bytes / 1024 / 1024).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)}MB`
+}
 
 export default App

@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('workshop', {
   showWindow: () => ipcRenderer.send('window:show'),
@@ -7,6 +7,9 @@ contextBridge.exposeInMainWorld('workshop', {
   openRecentProject: (folder) => ipcRenderer.invoke('project:open', folder),
   getRecentProjects: () => ipcRenderer.invoke('project:recent'),
   importMaterial: () => ipcRenderer.invoke('material:import'),
+  selectMaterialFiles: () => ipcRenderer.invoke('material:select'),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+  extractMaterial: (filePaths) => ipcRenderer.invoke('material:extract', filePaths),
   exportMaterial: () => ipcRenderer.invoke('material:export'),
   getProject: () => ipcRenderer.invoke('project:get'),
   saveAsset: (kind, value) => ipcRenderer.invoke('asset:save', kind, value),

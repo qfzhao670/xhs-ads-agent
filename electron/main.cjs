@@ -27,6 +27,11 @@ const {
   imageHash,
   readImageReferencePackage,
 } = require('./image-reference-package.cjs')
+const {
+  buildMaterialExtractionMessages,
+  normalizeExtractedMarkdown,
+  validateMaterialFiles,
+} = require('./material-extraction.cjs')
 
 const MARKER = '小红书运营工坊.json'
 const DATA_DIR = '项目数据'
@@ -222,6 +227,45 @@ function responseThinking(data) {
   const message = data?.choices?.[0]?.message || {}
   return contentText(message.reasoning_content || message.reasoning || message.thinking)
 }
+async function readChatCompletionText(response, onChunk, emptyMessage) {
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    const data = await response.json()
+    const text = responseText(data)
+    const reasoning = responseThinking(data)
+    if (reasoning) onChunk('thinking', reasoning)
+    if (text) onChunk('content', text)
+    if (!text) throw new Error(emptyMessage)
+    return text
+  }
+  if (!response.body) throw new Error('模型接口未返回可读取的流')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let fullText = ''
+  const consume = (line) => {
+    const value = line.trim()
+    if (!value.startsWith('data:')) return
+    const payload = value.slice(5).trim()
+    if (!payload || payload === '[DONE]') return
+    try {
+      const delta = streamDelta(JSON.parse(payload))
+      if (delta.thinking) onChunk('thinking', delta.thinking)
+      if (delta.content) { fullText += delta.content; onChunk('content', delta.content) }
+    } catch { /* Ignore malformed keep-alive events. */ }
+  }
+  while (true) {
+    const { done, value: chunk } = await reader.read()
+    buffer += decoder.decode(chunk || new Uint8Array(), { stream: !done })
+    const lines = buffer.split(/\r?\n/)
+    buffer = lines.pop() || ''
+    lines.forEach(consume)
+    if (done) break
+  }
+  if (buffer) consume(buffer)
+  if (!fullText) throw new Error(emptyMessage)
+  return fullText
+}
 async function callModel(system, user, onChunk = () => {}, thinking = false) {
   const { value } = await userConfig()
   if (!value.apiKey || !value.model || !value.baseUrl) throw new Error('请先在“模型设置”中填写接口地址、API Key 和模型名称')
@@ -239,42 +283,7 @@ async function callModel(system, user, onChunk = () => {}, thinking = false) {
     const body = await response.text()
     throw new Error(`模型接口返回 ${response.status}：${body.slice(0, 300)}`)
   }
-  const contentType = response.headers.get('content-type') || ''
-  if (contentType.includes('application/json')) {
-    const data = await response.json()
-    const text = responseText(data)
-    const reasoning = responseThinking(data)
-    if (reasoning) onChunk('thinking', reasoning)
-    onChunk('content', text)
-    return parseModelJson(text)
-  }
-  if (!response.body) throw new Error('模型接口未返回可读取的流')
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let fullText = ''
-  const consume = (line) => {
-    const value = line.trim()
-    if (!value.startsWith('data:')) return
-    const payload = value.slice(5).trim()
-    if (!payload || payload === '[DONE]') return
-    try {
-      const delta = streamDelta(JSON.parse(payload))
-      if (delta.thinking) onChunk('thinking', delta.thinking)
-      if (delta.content) { fullText += delta.content; onChunk('content', delta.content) }
-    } catch { /* Wait for the next complete SSE event. */ }
-  }
-  while (true) {
-    const { done, value: chunk } = await reader.read()
-    buffer += decoder.decode(chunk || new Uint8Array(), { stream: !done })
-    const lines = buffer.split(/\r?\n/)
-    buffer = lines.pop() || ''
-    lines.forEach(consume)
-    if (done) break
-  }
-  if (buffer) consume(buffer)
-  if (!fullText) throw new Error('模型流式返回中没有可读取的内容')
-  return parseModelJson(fullText)
+  return parseModelJson(await readChatCompletionText(response, onChunk, '模型流式返回中没有可读取的内容'))
 }
 
 function imageMime(file) {
@@ -718,6 +727,84 @@ ipcMain.handle('material:import', async () => {
     const meta = await readMeta(); await writeMeta(meta)
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
+})
+
+async function inspectMaterialFiles(filePaths) {
+  if (!Array.isArray(filePaths) || !filePaths.length) throw new Error('请先添加要提取的 PDF 或图片')
+  const uniquePaths = [...new Set(filePaths.map((file) => String(file || '')).filter(Boolean))]
+  const selected = await Promise.all(uniquePaths.map(async (file) => {
+    const stat = await fsp.stat(file)
+    if (!stat.isFile()) throw new Error(`不是可读取的文件：${path.basename(file)}`)
+    return { name: path.basename(file), file, size: stat.size }
+  }))
+  validateMaterialFiles(selected)
+  return selected
+}
+
+ipcMain.handle('material:select', async () => {
+  try {
+    if (!currentRoot) throw new Error('请先创建或打开项目')
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'PDF 或图片', extensions: ['pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif'] },
+        { name: 'PDF', extensions: ['pdf'] },
+        { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] },
+      ],
+      title: '添加要 AI 提取的 PDF 或图片',
+      buttonLabel: '添加到列表',
+    })
+    if (result.canceled || !result.filePaths.length) return { ok: false, error: '' }
+    return { ok: true, files: await inspectMaterialFiles(result.filePaths) }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('material:extract', async (event, filePaths) => {
+  const operation = 'material-ai'
+  const onChunk = modelStream(event, operation)
+  try {
+    if (!currentRoot) throw new Error('请先创建或打开项目')
+    const { value } = await userConfig()
+    if (!value.apiKey || !value.visionModel || !value.baseUrl) throw new Error('请先在“设置”中配置支持视觉理解的 OCR 模型')
+    const selected = await inspectMaterialFiles(filePaths)
+    const files = await Promise.all(selected.map(async (item) => ({ ...item, data: await fsp.readFile(item.file) })))
+    let endpoint = value.baseUrl.replace(/\/+$/, '')
+    if (!endpoint.endsWith('/chat/completions')) endpoint += '/chat/completions'
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10 * 60_000)
+    let response
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${value.apiKey}` },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: value.visionModel,
+          temperature: 0.1,
+          stream: true,
+          messages: buildMaterialExtractionMessages(files),
+        }),
+      })
+    } catch (error) {
+      if (error.name === 'AbortError') throw new Error('AI 提取超过 10 分钟，已停止等待；请缩小文件或分批重试')
+      throw new Error(`无法连接 OCR 模型接口：${error.message}`)
+    } finally { clearTimeout(timeout) }
+    if (!response.ok) {
+      const body = await response.text()
+      const hint = files.some((file) => path.extname(file.name).toLowerCase() === '.pdf')
+        ? '；请确认当前视觉模型及兼容接口支持 PDF 文件输入'
+        : ''
+      throw new Error(`OCR 模型返回 ${response.status}${hint}：${body.slice(0, 500)}`)
+    }
+    const markdown = normalizeExtractedMarkdown(await readChatCompletionText(response, onChunk, '视觉模型流式返回中没有可读取的 Markdown 内容'))
+    const target = path.join(currentRoot, '业务原始素材.md')
+    const temporary = `${target}.tmp`
+    await fsp.writeFile(temporary, markdown, 'utf8')
+    await fsp.rename(temporary, target)
+    const meta = await readMeta(); await writeMeta(meta)
+    modelStreamDone(event, operation)
+    return { ok: true, data: await loadProject() }
+  } catch (error) { modelStreamDone(event, operation); return { ok: false, error: error.message } }
 })
 
 ipcMain.handle('material:export', async () => {
