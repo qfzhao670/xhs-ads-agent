@@ -33,14 +33,37 @@ function defaultLayout(count) {
   return count === 1 ? 'single-full' : count === 2 ? 'hero-two' : count === 3 ? 'hero-three' : 'grid-four'
 }
 
+function comparableText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+}
+
+function draftText(draft = {}) {
+  const hashtags = Array.isArray(draft.hashtags) ? draft.hashtags.join(' ') : draft.hashtags
+  return comparableText([draft.title, draft.body, hashtags].filter(Boolean).join('\n'))
+}
+
+function validDraftEvidence(value, draft) {
+  const text = draftText(draft)
+  return stringList(value, 4).filter((quote) => {
+    const comparableQuote = comparableText(quote)
+    return comparableQuote.length >= 2 && text.includes(comparableQuote)
+  })
+}
+
 function sanitizeRealPosterPlan(value, draft, photos) {
   const validIds = new Set(photos.filter((item) => item.enabled !== false && item.taggingStatus === 'ready').map((item) => item.id))
   if (!validIds.size) throw new Error('没有已完成分析的业务实拍图片')
   const rawPages = Array.isArray(value?.pages) ? value.pages.slice(0, 6) : []
-  if (!rawPages.length) throw new Error('没有找到能由实拍素材支持的宣传主题')
+  if (!rawPages.length) throw new Error('当前文案与已启用的实拍图片没有足够关联，本次不生成宣传图')
   const used = new Set()
   const pages = []
   for (const raw of rawPages) {
+    const relevanceLevel = String(raw.relevanceLevel || '').trim()
+    const evidenceQuotes = validDraftEvidence(raw.evidenceQuotes, draft)
+    if (!['direct', 'supporting'].includes(relevanceLevel) || !evidenceQuotes.length) continue
     const ids = [...new Set(stringList(raw.sourcePhotoIds, 4).filter((id) => validIds.has(id) && !used.has(id)))].slice(0, 4)
     if (!ids.length) continue
     ids.forEach((id) => used.add(id))
@@ -59,14 +82,16 @@ function sanitizeRealPosterPlan(value, draft, photos) {
       subtitle: String(raw.subtitle || '').trim().slice(0, 36),
       sourcePhotoIds: ids,
       groupReason: String(raw.groupReason || '').trim(),
-      evidenceQuotes: stringList(raw.evidenceQuotes, 4),
+      evidenceQuotes,
+      relevanceLevel,
+      relevanceReason: String(raw.relevanceReason || raw.groupReason || '').trim(),
       layoutTemplateId,
       textPosition: ['top', 'bottom'].includes(raw.textPosition) ? raw.textPosition : 'bottom',
       accentColor: String(raw.accentColor || '#ffd43b').trim(),
       referenceImageIds: [],
     })
   }
-  if (!pages.length) throw new Error('分组结果没有包含有效的实拍图片')
+  if (!pages.length) throw new Error('当前文案与已启用的实拍图片没有足够关联，本次不生成宣传图')
   return {
     version: 1,
     concept: String(value.concept || '围绕已确认文案组织业务实拍素材').trim(),

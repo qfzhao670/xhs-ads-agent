@@ -154,6 +154,7 @@ type GeneratedImage = {
 type ImagePlanPage = {
   id: string; role: 'cover' | 'content' | 'summary'; label: string; purpose: string; title: string; referenceImageIds: string[]; brief: ImageBrief;
   promotionTheme?: string; subtitle?: string; sourcePhotoIds?: string[]; groupReason?: string; evidenceQuotes?: string[];
+  relevanceLevel?: 'direct' | 'supporting'; relevanceReason?: string;
   layoutTemplateId?: string; textPosition?: 'top' | 'bottom'; accentColor?: string
 }
 type ImagePlan = { version: number; concept: string; visualContinuity: string; pages: ImagePlanPage[] }

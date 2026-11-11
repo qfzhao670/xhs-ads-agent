@@ -654,23 +654,24 @@ async function createRealPosterPlan(project, draft, onChunk = () => {}) {
   const photos = project.realPhotos.filter((item) => item.enabled !== false && item.taggingStatus === 'ready')
   if (!photos.length) throw new Error('请先到“素材管理 → 业务实拍”上传图片并等待分析完成')
   const catalog = photos.map((item) => ({ id: item.id, width: item.width, height: item.height, tags: item.tags }))
-  const prompt = `请根据已确认的小红书文案，将业务实拍图片分成若干宣传图页面。
+  const prompt = `请只围绕当前已确认的小红书文案，判断业务实拍图片是否适合制作宣传图，并将适合的图片分成若干页面。
 
 核心规则：
-1. 先从已确认文案和业务原始素材中提取真正需要表达的主题，再选能共同表达同一主题的图片。
-2. 每页使用 1–4 张图片；不要为了凑数量加入弱相关图片。强主图可单独成页；全景+细节适合 2 张；一主两辅适合 3 张；同级场景集合适合 4 张。
-3. 同一图片不能重复出现在不同页面。仅颜色相近、都有人物或都在户外不能作为分组理由。
-4. 标题必须来自已确认文案和原始素材，不得添加新的奖项、级别、地点、效果、价格或承诺。主标题 6–16 字，副标题不超过 14 字。
-5. layoutTemplateId 按图片数量选择：1 张=single-full|single-caption；2 张=split-vertical|split-horizontal|hero-two；3 张=hero-three|left-three；4 张=grid-four|hero-four。
-6. textPosition 只能是 top 或 bottom；优先参考图片的 textSafeArea，避免遮挡主要人物、动作、建筑和道具。
-7. 每页必须给出 groupReason 和 evidenceQuotes，说明分组依据来自哪段原始素材或文案。没有文字依据的图片不要使用。
+1. 当前已确认文案是判断图片能否使用的唯一内容依据。图片即使与整个项目、业务原始素材或其他选题有关，只要不能支持当前文案，就必须排除。
+2. 先逐张判断相关性：direct=图片可直接呈现文案中的对象、活动、地点、过程或细节；supporting=图片虽非直接复现，但能自然辅助文案中的具体场景或观点；unrelated=只有项目、受众或宽泛场景相同。只允许使用 direct 或 supporting。
+3. 判断可以宽松，但必须存在具体内容联系。仅仅都出现孩子、都在户外、颜色相近、同属研学项目或同一业务，不能算相关。例如文案讨论光伏板与农业，鹤舞、非遗展陈或普通亲子活动照片属于 unrelated，不得使用。
+4. 每页使用 1–4 张图片；不要为了凑数量加入弱相关图片。强主图可单独成页；全景+细节适合 2 张；一主两辅适合 3 张；同级场景集合适合 4 张。
+5. 同一图片不能重复出现在不同页面。每一页内的图片还必须共同支持文案中的同一个具体主题。
+6. 每页必须填写 evidenceQuotes，且每一项都必须是从当前文案标题、正文或话题标签中逐字摘录的连续原句，不能引用业务原始素材，也不能概括或改写。groupReason 和 relevanceReason 要解释图片中可见内容如何支持该原句。
+7. 标题只能来自当前文案，不得添加新的奖项、级别、地点、效果、价格或承诺。主标题 6–16 字，副标题不超过 14 字。
+8. layoutTemplateId 按图片数量选择：1 张=single-full|single-caption；2 张=split-vertical|split-horizontal|hero-two；3 张=hero-three|left-three；4 张=grid-four|hero-four。
+9. textPosition 只能是 top 或 bottom；优先参考图片的 textSafeArea，避免遮挡主要人物、动作、建筑和道具。
+10. 如果没有任何 direct 或 supporting 图片，必须返回空的 pages 数组。宁可不生成，也不要扩大文案主题或勉强选图。
 
-业务原始素材：${project.material.content.slice(0, 20_000)}
-已确认业务事实：${JSON.stringify(project.facts)}
 已确认文案：${JSON.stringify(draft)}
 实拍图片目录：${JSON.stringify(catalog)}
 
-只输出 JSON：{"concept":"整套实拍宣传图主题","visualContinuity":"统一排版规则","pages":[{"promotionTheme":"本页共同主题","purpose":"本页作用","title":"主标题","subtitle":"副标题","sourcePhotoIds":["REALIMG-0001"],"groupReason":"为什么这些图片可以放在一起","evidenceQuotes":["文字依据"],"layoutTemplateId":"single-full","textPosition":"bottom","accentColor":"#ffd43b"}]}`
+只输出 JSON：{"concept":"整套实拍宣传图主题","visualContinuity":"统一排版规则","pages":[{"promotionTheme":"本页共同主题","purpose":"本页作用","title":"主标题","subtitle":"副标题","sourcePhotoIds":["REALIMG-0001"],"relevanceLevel":"direct|supporting|unrelated","relevanceReason":"图片与当前文案的具体联系","groupReason":"为什么这些图片可以放在一起","evidenceQuotes":["当前文案中的逐字原句"],"layoutTemplateId":"single-full","textPosition":"bottom","accentColor":"#ffd43b"}]}`
   const result = await callModel(modelSystem, prompt, onChunk, false)
   return sanitizeRealPosterPlan(result, draft, photos)
 }
