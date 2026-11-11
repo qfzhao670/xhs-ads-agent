@@ -16,4 +16,4 @@ build/icon.iconset/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
-
+promo-video
