@@ -49,7 +49,7 @@ interface Window {
     removeFinalContent(id: string): Promise<ApiResult>
     createImageSet(version: number): Promise<ApiResult>
     createRealPosterPlan(version: number): Promise<ApiResult>
-    saveRealPosterPage(taskId: string, pageId: string, dataUrl: string): Promise<ApiResult>
+    saveRealPosterPage(taskId: string, pageId: string, dataUrl: string, pageUpdate?: RealPosterPageUpdate): Promise<ApiResult>
     regenerateImagePage(taskId: string, pageId: string, feedback: string): Promise<ApiResult>
     readGeneratedImage(relativePath: string): Promise<ApiResult>
     exportGeneratedImage(taskId: string, imageId: string): Promise<ApiResult>
@@ -157,6 +157,7 @@ type ImagePlanPage = {
   relevanceLevel?: 'direct' | 'supporting'; relevanceReason?: string;
   layoutTemplateId?: string; textPosition?: 'top' | 'bottom'; accentColor?: string
 }
+type RealPosterPageUpdate = Pick<ImagePlanPage, 'id' | 'title' | 'subtitle' | 'sourcePhotoIds' | 'layoutTemplateId' | 'textPosition' | 'accentColor'>
 type ImagePlan = { version: number; concept: string; visualContinuity: string; pages: ImagePlanPage[] }
 type ImageTask = {
   id: string; mode?: 'ai_generated' | 'real_photo_poster'; generationId: string; strategyId: string; draftVersion: number; brief: ImageBrief | null;

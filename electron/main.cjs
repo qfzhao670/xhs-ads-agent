@@ -2042,7 +2042,7 @@ function findImageTaskContext(project, taskId) {
   return null
 }
 
-ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl) => {
+ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl, pageUpdate) => {
   try {
     const project = await loadProject()
     const taskIndex = project.imageTasks.findIndex((item) => item.id === String(taskId))
@@ -2050,8 +2050,31 @@ ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl) 
     const tasks = [...project.imageTasks]
     const task = normalizeImageTask(tasks[taskIndex])
     if (task.mode !== 'real_photo_poster') throw new Error('当前任务不是实拍宣传图')
-    const page = task.plan.pages.find((item) => item.id === String(pageId))
-    if (!page) throw new Error('没有找到要保存的宣传图页面')
+    const pageIndex = task.plan.pages.findIndex((item) => item.id === String(pageId))
+    if (pageIndex < 0) throw new Error('没有找到要保存的宣传图页面')
+    let page = task.plan.pages[pageIndex]
+    if (pageUpdate && typeof pageUpdate === 'object') {
+      const sourcePhotoIds = Array.isArray(pageUpdate.sourcePhotoIds) ? pageUpdate.sourcePhotoIds.map(String).filter(Boolean).slice(0, 4) : []
+      if (!sourcePhotoIds.length) throw new Error('宣传图至少需要一张实拍图片')
+      if (new Set(sourcePhotoIds).size !== sourcePhotoIds.length) throw new Error('同一张实拍图片不能在一页中重复使用')
+      const validPhotoIds = new Set(project.realPhotos.map((item) => item.id))
+      if (sourcePhotoIds.some((id) => !validPhotoIds.has(id))) throw new Error('宣传图中包含已不存在的实拍图片')
+      const layoutsByCount = {
+        1: ['single'],
+        2: ['split-vertical', 'split-horizontal', 'hero-two'],
+        3: ['left-three', 'hero-three'],
+        4: ['hero-four', 'grid-four'],
+      }
+      const layoutTemplateId = String(pageUpdate.layoutTemplateId || '')
+      if (!layoutsByCount[sourcePhotoIds.length]?.includes(layoutTemplateId)) throw new Error('当前图片数量与所选版式不匹配')
+      const title = String(pageUpdate.title || '').trim().slice(0, 40)
+      if (!title) throw new Error('主标题不能为空')
+      const subtitle = String(pageUpdate.subtitle || '').trim().slice(0, 60)
+      const textPosition = pageUpdate.textPosition === 'top' ? 'top' : 'bottom'
+      const accentColor = /^#[0-9a-f]{6}$/i.test(String(pageUpdate.accentColor || '')) ? String(pageUpdate.accentColor) : '#ffd43b'
+      page = { ...page, title, subtitle, sourcePhotoIds, layoutTemplateId, textPosition, accentColor }
+      task.plan = { ...task.plan, pages: task.plan.pages.map((item, index) => index === pageIndex ? page : item) }
+    }
     const match = String(dataUrl || '').match(/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/)
     if (!match) throw new Error('宣传图渲染结果格式不正确')
     const buffer = Buffer.from(match[1], 'base64')

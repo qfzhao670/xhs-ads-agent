@@ -5,7 +5,10 @@ import {
   PackageOpen, PenLine, Plus, RefreshCw, Save, Scale, Settings, SlidersHorizontal,
   Sparkles, Trash2, Upload, WandSparkles, X,
 } from 'lucide-react'
-import { renderRealPosterPage } from './real-poster-renderer'
+import {
+  defaultRealPosterLayout, REAL_POSTER_LAYOUTS, realPosterLayoutRects,
+  renderRealPosterPage, renderRealPosterPreview,
+} from './real-poster-renderer'
 
 type Page = 'generate' | 'library' | 'assets' | 'settings'
 type Modal = 'project-init' | AssetKind | null
@@ -501,6 +504,30 @@ function App() {
     } catch (e) { showError(e instanceof Error ? e.message : '实拍宣传图制作失败'); return false }
     finally { setBusy('') }
   }
+  async function saveRealPosterEdit(taskId: string, pageUpdate: RealPosterPageUpdate) {
+    if (!project) return false
+    setBusy(`real-poster-edit:${pageUpdate.id}`); setError('')
+    try {
+      const task = project.imageTasks.find((item) => item.id === taskId)
+      const page = task?.plan.pages.find((item) => item.id === pageUpdate.id)
+      if (!task || !page) throw new Error('没有找到要编辑的实拍宣传图')
+      const photoIds = pageUpdate.sourcePhotoIds || []
+      const entries = await Promise.all(photoIds.map(async (id) => {
+        const photo = project.realPhotos.find((item) => item.id === id)
+        if (!photo) throw new Error(`没有找到实拍素材 ${id}`)
+        const result = await window.workshop.readGeneratedImage(photo.relativePath)
+        if (!result.ok || !result.imageUrl) throw new Error(result.error || `无法读取实拍素材 ${id}`)
+        return [id, result.imageUrl] as const
+      }))
+      const dataUrl = await renderRealPosterPage({ ...page, ...pageUpdate }, project.realPhotos, Object.fromEntries(entries))
+      const saved = await window.workshop.saveRealPosterPage(task.id, page.id, dataUrl, pageUpdate)
+      if (!saved.ok || !saved.data) throw new Error(saved.error || `保存${page.label}失败`)
+      setProject(saved.data)
+      flash(`${page.label}已保存为新版本`)
+      return true
+    } catch (e) { showError(e instanceof Error ? e.message : '实拍宣传图保存失败'); return false }
+    finally { setBusy('') }
+  }
   async function deleteAsset(kind: AssetKind, id: string) {
     if (!window.confirm(`确定删除 ${id}？该编号之后不会再分配给新记录。`)) return
     await run('delete', () => window.workshop.deleteAsset(kind, id), '记录已删除')
@@ -610,6 +637,7 @@ function App() {
           confirm={(version) => run('confirm', () => window.workshop.confirmDraft(version), '当前文案已确认')}
           createImageSet={(version) => run('image-set', () => window.workshop.createImageSet(version), '整套配图已生成并保存到项目')}
           createRealPosterSet={createRealPosterSet}
+          saveRealPosterEdit={saveRealPosterEdit}
           regenerateImage={(taskId, pageId, feedback) => run(`image-regenerate:${pageId}`, () => window.workshop.regenerateImagePage(taskId, pageId, feedback), feedback ? '已按建议生成新版本' : '已改写提示词并生成新版本')}
           exportImage={async (taskId, imageId) => { const result = await window.workshop.exportGeneratedImage(taskId, imageId); if (!result.ok) showError(result.error); else if (result.savedPath) flash('图片已导出') }}
           exportImageSet={async (taskId) => { const result = await window.workshop.exportImageSet(taskId); if (!result.ok) showError(result.error); else if (result.savedPath) flash('整套图片已导出') }}
@@ -655,6 +683,7 @@ type GenerationPageProps = {
   confirm: (version: number) => void;
   createImageSet: (version: number) => Promise<boolean>;
   createRealPosterSet: (version: number) => Promise<boolean>;
+  saveRealPosterEdit: (taskId: string, page: RealPosterPageUpdate) => Promise<boolean>;
   regenerateImage: (taskId: string, pageId: string, feedback: string) => Promise<boolean>;
   exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void;
   goReferenceLibrary: () => void;
@@ -735,7 +764,7 @@ function CurrentFlow(props: GenerationPageProps) {
   if (flowStep === 4) return <StrategyStep project={project} busy={props.busy} thinking={props.thinkingModes.strategies} setThinking={(value) => props.setThinkingMode('strategies', value)} generate={props.generateStrategies} choice={props.choice} setChoice={props.setChoice} strategyAdvice={props.strategyAdvice} setStrategyAdvice={props.setStrategyAdvice} save={props.saveStrategy} />
   if (flowStep === 5) return <ComposeStep project={project} strategies={props.selectedStrategies} busy={props.busy} thinking={props.thinkingModes.draft} setThinking={(value) => props.setThinkingMode('draft', value)} generate={props.generateDraft} back={() => props.setFlowStep(4)} />
   if (flowStep === 6) return <ReviewStep key={props.draft?.version ?? 'empty'} project={project} draft={props.draft} viewVersion={props.viewVersion} setViewVersion={props.setViewVersion} revision={props.revision} setRevision={props.setRevision} busy={props.busy} thinking={props.thinkingModes.revise} setThinking={(value) => props.setThinkingMode('revise', value)} revise={props.revise} saveManual={props.saveManual} confirm={props.confirm} goImages={() => props.setFlowStep(7)} />
-  if (flowStep === 7) return <ImageStep project={project} busy={props.busy} stream={props.stream} imageProgress={props.imageProgress} createImageSet={props.createImageSet} createRealPosterSet={props.createRealPosterSet} regenerateImage={props.regenerateImage} exportImage={props.exportImage} exportImageSet={props.exportImageSet} goReferenceLibrary={props.goReferenceLibrary} goRealPhotoLibrary={props.goRealPhotoLibrary} goArchive={() => props.setFlowStep(8)} />
+  if (flowStep === 7) return <ImageStep project={project} busy={props.busy} stream={props.stream} imageProgress={props.imageProgress} createImageSet={props.createImageSet} createRealPosterSet={props.createRealPosterSet} saveRealPosterEdit={props.saveRealPosterEdit} regenerateImage={props.regenerateImage} exportImage={props.exportImage} exportImageSet={props.exportImageSet} goReferenceLibrary={props.goReferenceLibrary} goRealPhotoLibrary={props.goRealPhotoLibrary} goArchive={() => props.setFlowStep(8)} />
   return <ArchiveStep project={project} busy={props.busy} archiveFinal={props.archiveFinal} goImages={() => props.setFlowStep(7)} />
 }
 
@@ -824,9 +853,10 @@ function ReviewStep({ project, draft, viewVersion, setViewVersion, revision, set
   </section>
 }
 
-function ImageStep({ project, busy, stream, imageProgress, createImageSet, createRealPosterSet, regenerateImage, exportImage, exportImageSet, goReferenceLibrary, goRealPhotoLibrary, goArchive }: {
+function ImageStep({ project, busy, stream, imageProgress, createImageSet, createRealPosterSet, saveRealPosterEdit, regenerateImage, exportImage, exportImageSet, goReferenceLibrary, goRealPhotoLibrary, goArchive }: {
   project: ProjectData; busy: string; stream: { operation: string; content: string; thinking: string; done: boolean }; imageProgress: Record<string, ImageProgressEvent>;
   createImageSet: (version: number) => Promise<boolean>; createRealPosterSet: (version: number) => Promise<boolean>;
+  saveRealPosterEdit: (taskId: string, page: RealPosterPageUpdate) => Promise<boolean>;
   regenerateImage: (taskId: string, pageId: string, feedback: string) => Promise<boolean>;
   exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void;
   goReferenceLibrary: () => void; goRealPhotoLibrary: () => void; goArchive: () => void;
@@ -837,6 +867,7 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({})
   const [feedbacks, setFeedbacks] = useState<Record<string, string>>({})
   const [editingPage, setEditingPage] = useState('')
+  const [posterEditorPageId, setPosterEditorPageId] = useState('')
   const planningStreamRef = useRef<HTMLPreElement>(null)
   const draft = confirmedDrafts.find((item) => item.version === selectedVersion) || confirmedDrafts[0]
   const task = project.imageTasks.find((item) => item.draftVersion === draft?.version && item.strategyId === draft?.strategyId && (item.mode || 'ai_generated') === imageMode)
@@ -914,7 +945,7 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
           <div className="story-image">{image && imageUrls[image.id] ? <img src={imageUrls[image.id]} alt={`${page.label}：${page.title}`} /> : <div className={`story-image-empty ${generating ? 'generation-canvas' : ''}`}>{generating ? <><div className="canvas-orb" /><i className="canvas-scan" /><LoaderCircle className="spin" size={22} /><b>正在制作{page.label}</b></> : <><ImageIcon size={25} /><span>等待生成</span></>}</div>}<span className="story-index">{String(index + 1).padStart(2, '0')}</span><span className="story-role">{page.label}</span>{regenerating && <div className="story-image-busy"><LoaderCircle className="spin" size={25} /><b>正在更新{page.label}</b></div>}</div>
           <div className="story-copy"><div><h3>{page.title}</h3><p>{isReal ? page.groupReason || page.purpose : page.purpose}</p></div><span>版本 {Math.max(1, revisions)}</span></div>
           <div className="story-references"><span>{isReal ? `${references.length} 张实拍` : '本页参考'}</span><div>{references.map((reference) => { const summary = 'originalDescription' in reference.tags ? reference.tags.originalDescription : reference.tags.summary; return <span key={reference.id} title={summary}>{imageUrls[reference.id] ? <img src={imageUrls[reference.id]} alt={summary} /> : <ImageIcon size={14} />}<small>{reference.id}</small></span> })}</div></div>
-          <div className="story-actions"><button className="text-button" onClick={() => image && exportImage(task!.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button>{!isReal && <><button className="secondary compact" onClick={() => regenerateImage(task!.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button><button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button></>}</div>
+          <div className="story-actions"><button className="text-button" onClick={() => image && exportImage(task!.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button>{isReal ? <button className="secondary compact" onClick={() => setPosterEditorPageId(page.id)} disabled={!image || !!busy}><PenLine size={14} />编辑图片</button> : <><button className="secondary compact" onClick={() => regenerateImage(task!.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button><button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button></>}</div>
           {!isReal && editing && <div className="story-feedback"><label htmlFor={`feedback-${page.id}`}>你希望怎么改？</label><textarea id={`feedback-${page.id}`} rows={3} value={feedbacks[page.id] || ''} onChange={(event) => setFeedbacks({ ...feedbacks, [page.id]: event.target.value })} /><button className="primary compact" onClick={async () => { const ok = await regenerateImage(task!.id, page.id, feedbacks[page.id] || ''); if (ok) setEditingPage('') }} disabled={!feedbacks[page.id]?.trim() || !!busy}><WandSparkles size={14} />按要求重新生成</button></div>}
         </article>
       })}</div>
@@ -923,7 +954,173 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
     </>}
     {allIllustrated && <div className="image-finish-bar"><div><CheckCircle2 size={21} /><span><b>本轮套图已完成</b><small>每篇文案都已经有可入库的配图。</small></span></div></div>}
     <div className="panel-actions"><span className="skip-note">配图可以稍后补充；终稿避重只分析文字，不分析图片。</span><button className="primary" onClick={goArchive} disabled={!!busy}>继续确认入库<ChevronRight size={17} /></button></div>
+    {isReal && task && posterEditorPageId && task.plan.pages.find((page) => page.id === posterEditorPageId) && <RealPosterEditor
+      key={`${task.id}:${posterEditorPageId}`}
+      task={task}
+      page={task.plan.pages.find((page) => page.id === posterEditorPageId)!}
+      photos={project.realPhotos}
+      initialSources={imageUrls}
+      busy={busy === `real-poster-edit:${posterEditorPageId}`}
+      close={() => setPosterEditorPageId('')}
+      save={(pageUpdate) => saveRealPosterEdit(task.id, pageUpdate)}
+    />}
   </section>
+}
+
+function RealPosterEditor({ task, page, photos, initialSources, busy, close, save }: {
+  task: ImageTask; page: ImagePlanPage; photos: RealPhoto[]; initialSources: Record<string, string>; busy: boolean;
+  close: () => void; save: (page: RealPosterPageUpdate) => Promise<boolean>;
+}) {
+  const startingIds = page.sourcePhotoIds?.length ? page.sourcePhotoIds.slice(0, 4) : ['']
+  const startingLayout = REAL_POSTER_LAYOUTS.some((item) => item.id === page.layoutTemplateId && item.count === startingIds.length)
+    ? page.layoutTemplateId! : defaultRealPosterLayout(startingIds.length)
+  const startingDraft: RealPosterPageUpdate = {
+    id: page.id,
+    title: page.title || '',
+    subtitle: page.subtitle || '',
+    sourcePhotoIds: startingIds,
+    layoutTemplateId: startingLayout,
+    textPosition: page.textPosition === 'top' ? 'top' : 'bottom',
+    accentColor: page.accentColor || '#ffd43b',
+  }
+  const [draft, setDraft] = useState<RealPosterPageUpdate>(startingDraft)
+  const [selectedSlot, setSelectedSlot] = useState(0)
+  const [assetSources, setAssetSources] = useState(initialSources)
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [previewing, setPreviewing] = useState(true)
+  const [query, setQuery] = useState('')
+  const initialSnapshot = useRef(JSON.stringify(startingDraft))
+  const sourceIds = draft.sourcePhotoIds || ['']
+  const usablePhotos = photos.filter((photo) => photo.enabled && photo.taggingStatus === 'ready')
+  const dirty = JSON.stringify(draft) !== initialSnapshot.current
+  const complete = Boolean(draft.title?.trim()) && sourceIds.length > 0 && sourceIds.every(Boolean)
+  const selectedPhoto = photos.find((photo) => photo.id === sourceIds[selectedSlot])
+  const layouts = REAL_POSTER_LAYOUTS.filter((layout) => layout.count === sourceIds.length)
+  const rects = realPosterLayoutRects(draft.layoutTemplateId || defaultRealPosterLayout(sourceIds.length), sourceIds.length)
+  const filteredPhotos = usablePhotos.filter((photo) => {
+    const haystack = `${photo.id} ${photo.originalName} ${photo.tags.originalDescription} ${photo.tags.themeTags.join(' ')} ${photo.tags.sceneTags.join(' ')}`.toLowerCase()
+    return haystack.includes(query.trim().toLowerCase())
+  })
+
+  const attemptClose = () => {
+    if (!busy && dirty && !window.confirm('当前修改还没有保存，确定关闭编辑器吗？')) return
+    close()
+  }
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') attemptClose() }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.body.style.overflow = previousOverflow; document.removeEventListener('keydown', onKeyDown) }
+  }, [dirty, busy])
+
+  useEffect(() => {
+    let active = true
+    const missing = usablePhotos.filter((photo) => !assetSources[photo.id])
+    if (!missing.length) return () => { active = false }
+    Promise.all(missing.map(async (photo) => {
+      const result = await window.workshop.readGeneratedImage(photo.relativePath)
+      return [photo.id, result.ok ? result.imageUrl || '' : ''] as const
+    })).then((entries) => { if (active) setAssetSources((current) => ({ ...current, ...Object.fromEntries(entries) })) })
+    return () => { active = false }
+  }, [page.id])
+
+  useEffect(() => {
+    let active = true
+    const timer = window.setTimeout(() => {
+      setPreviewing(true)
+      renderRealPosterPreview({ ...page, ...draft }, photos, assetSources)
+        .then((url) => { if (active) setPreviewUrl(url) })
+        .finally(() => { if (active) setPreviewing(false) })
+    }, 120)
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [draft, assetSources])
+
+  const changeCount = (count: number) => {
+    const previousCount = sourceIds.length
+    const nextIds = Array.from({ length: count }, (_, index) => sourceIds[index] || '')
+    setDraft((current) => ({ ...current, sourcePhotoIds: nextIds, layoutTemplateId: defaultRealPosterLayout(count) }))
+    setSelectedSlot((current) => count > previousCount ? previousCount : Math.min(current, count - 1))
+  }
+
+  const removeSlot = (index: number) => {
+    if (sourceIds.length === 1) {
+      setDraft((current) => ({ ...current, sourcePhotoIds: [''] }))
+      setSelectedSlot(0)
+      return
+    }
+    const nextIds = sourceIds.filter((_, itemIndex) => itemIndex !== index)
+    setDraft((current) => ({ ...current, sourcePhotoIds: nextIds, layoutTemplateId: defaultRealPosterLayout(nextIds.length) }))
+    setSelectedSlot((current) => Math.min(current > index ? current - 1 : current, nextIds.length - 1))
+  }
+
+  const choosePhoto = (photoId: string) => {
+    const nextIds = [...sourceIds]
+    const existingIndex = nextIds.indexOf(photoId)
+    if (existingIndex >= 0 && existingIndex !== selectedSlot) {
+      const previous = nextIds[selectedSlot]
+      nextIds[selectedSlot] = photoId
+      nextIds[existingIndex] = previous
+    } else nextIds[selectedSlot] = photoId
+    setDraft((current) => ({ ...current, sourcePhotoIds: nextIds }))
+  }
+
+  return <div className="poster-editor-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) attemptClose() }}>
+    <div className="poster-editor" role="dialog" aria-modal="true" aria-labelledby="poster-editor-title">
+      <header className="poster-editor-head">
+        <div><span className="poster-editor-mark"><PenLine size={17} /></span><div><h2 id="poster-editor-title">编辑{page.label}</h2><p>{task.strategyId} · 修改会另存为新版本，原图不会被覆盖</p></div></div>
+        <button className="icon-button" onClick={attemptClose} disabled={busy} aria-label="关闭编辑器"><X size={17} /></button>
+      </header>
+      <div className="poster-editor-body">
+        <section className="poster-preview-pane" aria-label="宣传图实时预览">
+          <div className="poster-preview-toolbar"><span>实时成片</span><small>{sourceIds.length} 张图片 · {layouts.find((item) => item.id === draft.layoutTemplateId)?.name}</small></div>
+          <div className="poster-preview-stage">
+            <div className={`poster-preview-canvas ${previewing ? 'updating' : ''}`}>
+              {previewUrl ? <img src={previewUrl} alt={`${page.label}编辑预览`} /> : <div className="poster-preview-loading"><LoaderCircle className="spin" size={24} /><span>正在准备画布</span></div>}
+              {rects.map((rect, index) => <button
+                key={`${index}-${sourceIds[index]}`}
+                className={`${selectedSlot === index ? 'selected' : ''} ${sourceIds[index] ? '' : 'empty'}`}
+                style={{ left: `${rect.x / 10.8}%`, top: `${rect.y / 14.4}%`, width: `${rect.width / 10.8}%`, height: `${rect.height / 14.4}%` }}
+                onClick={() => setSelectedSlot(index)}
+                aria-label={`选择图片槽位 ${index + 1}`}
+              ><span>{index + 1}</span>{!sourceIds[index] && <b>选择图片</b>}</button>)}
+            </div>
+          </div>
+          <div className="poster-preview-hint"><span>{selectedSlot + 1}</span><div><b>{selectedPhoto ? selectedPhoto.tags.originalDescription || selectedPhoto.originalName : `图片 ${selectedSlot + 1} 还未选择`}</b><small>{selectedPhoto ? '在右侧素材区选择另一张即可替换' : '从右侧素材区选择一张图片填入这里'}</small></div></div>
+        </section>
+        <aside className="poster-control-pane">
+          <section className="poster-control-section">
+            <div className="poster-control-heading"><div><b>标题文案</b><span>预览会自动处理换行和可读性</span></div></div>
+            <label className="poster-field"><span>主标题 <small>{draft.title?.length || 0}/40</small></span><input maxLength={40} value={draft.title || ''} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="输入宣传图主标题" /></label>
+            <label className="poster-field"><span>副标题 <small>{draft.subtitle?.length || 0}/60</small></span><input maxLength={60} value={draft.subtitle || ''} onChange={(event) => setDraft({ ...draft, subtitle: event.target.value })} placeholder="可选，用一句话补充信息" /></label>
+            <div className="poster-style-row"><div><span>文字位置</span><div className="poster-segmented"><button className={draft.textPosition === 'top' ? 'active' : ''} onClick={() => setDraft({ ...draft, textPosition: 'top' })}>顶部</button><button className={draft.textPosition === 'bottom' ? 'active' : ''} onClick={() => setDraft({ ...draft, textPosition: 'bottom' })}>底部</button></div></div><div><span>强调色</span><div className="poster-color-list">{['#ffd43b', '#fb7185', '#5eead4', '#93c5fd', '#ffffff'].map((color) => <button key={color} className={draft.accentColor === color ? 'active' : ''} style={{ backgroundColor: color }} onClick={() => setDraft({ ...draft, accentColor: color })} aria-label={`选择强调色 ${color}`}>{draft.accentColor === color && <Check size={12} />}</button>)}</div></div></div>
+          </section>
+
+          <section className="poster-control-section">
+            <div className="poster-control-heading"><div><b>图片与排版</b><span>先确定图片数量，再选择对应版式</span></div><em>{sourceIds.filter(Boolean).length}/{sourceIds.length} 已填</em></div>
+            <div className="poster-count-picker" role="group" aria-label="图片数量">{[1, 2, 3, 4].map((count) => <button key={count} className={sourceIds.length === count ? 'active' : ''} onClick={() => changeCount(count)}><b>{count}</b><span>{count === 1 ? '单图' : `${count} 图`}</span></button>)}</div>
+            <div className="poster-layout-list">{layouts.map((layout) => <button key={layout.id} className={draft.layoutTemplateId === layout.id ? 'active' : ''} onClick={() => setDraft({ ...draft, layoutTemplateId: layout.id })}><PosterLayoutDiagram id={layout.id} count={layout.count} /><span><b>{layout.name}</b><small>{layout.description}</small></span>{draft.layoutTemplateId === layout.id && <CheckCircle2 size={16} />}</button>)}</div>
+            <div className="poster-slot-list">{sourceIds.map((id, index) => {
+              const photo = photos.find((item) => item.id === id)
+              return <div key={`${index}-${id}`} className={`poster-slot-row ${selectedSlot === index ? 'active' : ''}`} role="button" tabIndex={0} onClick={() => setSelectedSlot(index)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedSlot(index) } }}><span className="poster-slot-thumb">{id && assetSources[id] ? <img src={assetSources[id]} alt="" /> : <ImageIcon size={17} />}</span><span><b>图片 {index + 1}</b><small>{photo ? photo.tags.originalDescription || photo.originalName : '点击后从下方素材中选择'}</small></span><span className="poster-slot-status">{id ? '替换' : '待选择'}</span><button aria-label={`移除图片 ${index + 1}`} onClick={(event) => { event.stopPropagation(); removeSlot(index) }}><Trash2 size={13} /></button></div>
+            })}</div>
+          </section>
+
+          <section className="poster-control-section poster-assets-section">
+            <div className="poster-control-heading"><div><b>替换图片 {selectedSlot + 1}</b><span>选择素材后会立即出现在左侧画布</span></div></div>
+            <label className="poster-search"><ImageIcon size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索图片编号、场景或描述" />{query && <button onClick={() => setQuery('')} aria-label="清空搜索"><X size={13} /></button>}</label>
+            {filteredPhotos.length ? <div className="poster-asset-grid">{filteredPhotos.map((photo) => <button key={photo.id} className={sourceIds[selectedSlot] === photo.id ? 'active' : ''} onClick={() => choosePhoto(photo.id)} title={photo.tags.originalDescription || photo.originalName}>{assetSources[photo.id] ? <img src={assetSources[photo.id]} alt={photo.tags.originalDescription || photo.originalName} /> : <span><LoaderCircle className="spin" size={16} /></span>}<small>{photo.id}</small>{sourceIds.includes(photo.id) && <b>{sourceIds.indexOf(photo.id) + 1}</b>}</button>)}</div> : <div className="poster-assets-empty"><ImageIcon size={20} /><span>没有匹配的实拍图片</span></div>}
+          </section>
+        </aside>
+      </div>
+      <footer className="poster-editor-actions"><span className={complete && dirty ? 'ready' : ''}>{complete ? dirty ? <><CheckCircle2 size={15} />已准备好保存</> : <>修改任一内容后即可保存新版本</> : <>还有 {sourceIds.filter((id) => !id).length} 个图片位置待填写</>}</span><div><button className="secondary" onClick={attemptClose} disabled={busy}>取消</button><button className="primary" disabled={!complete || !dirty || busy} onClick={async () => { if (await save(draft)) close() }}>{busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{busy ? '正在保存' : '保存新版本'}</button></div></footer>
+    </div>
+  </div>
+}
+
+function PosterLayoutDiagram({ id, count }: { id: string; count: number }) {
+  return <span className={`poster-layout-diagram layout-${id}`}>{Array.from({ length: count }, (_, index) => <i key={index} />)}</span>
 }
 
 function ArchiveStep({ project, busy, archiveFinal, goImages }: { project: ProjectData; busy: string; archiveFinal: (version: number) => Promise<boolean>; goImages: () => void }) {
