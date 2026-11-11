@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('workshop', {
   setImageReferenceRole: (id, isCover) => ipcRenderer.invoke('image-reference:set-role', id, isCover),
   toggleImageReference: (id, enabled) => ipcRenderer.invoke('image-reference:toggle', id, enabled),
   deleteImageReference: (id) => ipcRenderer.invoke('image-reference:delete', id),
+  uploadRealPhotos: () => ipcRenderer.invoke('real-photo:upload'),
+  retagRealPhoto: (id) => ipcRenderer.invoke('real-photo:retag', id),
+  toggleRealPhoto: (id, enabled) => ipcRenderer.invoke('real-photo:toggle', id, enabled),
+  deleteRealPhoto: (id) => ipcRenderer.invoke('real-photo:delete', id),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),
   saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
@@ -41,6 +45,8 @@ contextBridge.exposeInMainWorld('workshop', {
   archiveFinal: (version, force) => ipcRenderer.invoke('workflow:archive-final', version, force),
   removeFinalContent: (id) => ipcRenderer.invoke('final-content:remove', id),
   createImageSet: (version) => ipcRenderer.invoke('image:create-set', version),
+  createRealPosterPlan: (version) => ipcRenderer.invoke('real-poster:create-plan', version),
+  saveRealPosterPage: (taskId, pageId, dataUrl) => ipcRenderer.invoke('real-poster:save-page', taskId, pageId, dataUrl),
   regenerateImagePage: (taskId, pageId, feedback) => ipcRenderer.invoke('image:regenerate-page', taskId, pageId, feedback),
   readGeneratedImage: (relativePath) => ipcRenderer.invoke('image:read', relativePath),
   exportGeneratedImage: (taskId, imageId) => ipcRenderer.invoke('image:export', taskId, imageId),
@@ -54,6 +60,11 @@ contextBridge.exposeInMainWorld('workshop', {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('image-reference:progress', listener)
     return () => ipcRenderer.removeListener('image-reference:progress', listener)
+  },
+  onRealPhotoProgress: (callback) => {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('real-photo:progress', listener)
+    return () => ipcRenderer.removeListener('real-photo:progress', listener)
   },
   onModelStream: (callback) => {
     const listener = (_event, payload) => callback(payload)

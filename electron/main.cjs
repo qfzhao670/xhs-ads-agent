@@ -32,6 +32,10 @@ const {
   normalizeExtractedMarkdown,
   validateMaterialFiles,
 } = require('./material-extraction.cjs')
+const {
+  sanitizeRealPhotoTags,
+  sanitizeRealPosterPlan,
+} = require('./real-photo-utils.cjs')
 
 const MARKER = '小红书运营工坊.json'
 const DATA_DIR = '项目数据'
@@ -39,6 +43,8 @@ const OUTPUT_DIR = '生成结果'
 const IMAGE_TASKS_FILE = '配图记录.json'
 const IMAGE_REFERENCES_FILE = '小红书图片参考库.json'
 const IMAGE_REFERENCES_DIR = '小红书图片参考库'
+const REAL_PHOTOS_FILE = '业务实拍图库.json'
+const REAL_PHOTOS_DIR = '业务实拍图库'
 const GENERATION_CONFIG_FILE = '生成配置.json'
 const FINAL_CONTENTS_FILE = '终稿内容库.json'
 let currentRoot = ''
@@ -121,6 +127,21 @@ function normalizeImageReference(value = {}) {
   }
 }
 
+function normalizeRealPhoto(value = {}) {
+  return {
+    ...value,
+    id: String(value.id || ''),
+    originalName: String(value.originalName || ''),
+    relativePath: String(value.relativePath || ''),
+    width: Number(value.width) || 0,
+    height: Number(value.height) || 0,
+    enabled: value.enabled !== false,
+    taggingStatus: ['ready', 'failed', 'pending'].includes(value.taggingStatus) ? value.taggingStatus : value.tags ? 'ready' : 'pending',
+    taggingError: String(value.taggingError || ''),
+    tags: sanitizeRealPhotoTags(value.tags),
+  }
+}
+
 async function loadProject() {
   if (!currentRoot) return null
   const meta = await readMeta()
@@ -131,6 +152,7 @@ async function loadProject() {
   const references = (await readJson(dataPath(assetFiles.references), [])).map((item) => normalizeAsset('references', item))
   const rules = (await readJson(dataPath(assetFiles.rules), [])).map((item) => normalizeAsset('rules', item))
   const imageReferences = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
+  const realPhotos = (await readJson(dataPath(REAL_PHOTOS_FILE), [])).map(normalizeRealPhoto)
   const finalContents = (await readJson(dataPath(FINAL_CONTENTS_FILE), [])).map(normalizeFinalContent)
   const facts = await readJson(outputPath('业务事实.json'), null)
   const generationConfig = normalizeGenerationConfig(await readJson(outputPath(GENERATION_CONFIG_FILE), {}))
@@ -150,7 +172,7 @@ async function loadProject() {
       name: materialExists ? '业务原始素材.md' : '',
       content: materialExists ? await fsp.readFile(materialFile, 'utf8') : '',
     },
-    keywords, references, rules, imageReferences, finalContents, facts, generationConfig, strategies,
+    keywords, references, rules, imageReferences, realPhotos, finalContents, facts, generationConfig, strategies,
     selectedStrategyIds: Array.isArray(selection.selectedStrategyIds)
       ? selection.selectedStrategyIds
       : selection.selectedStrategyId ? [selection.selectedStrategyId] : [],
@@ -342,6 +364,45 @@ async function callVisionTagger(reference) {
   return sanitizeImageReferenceTags(parseModelJson(responseText(await response.json())))
 }
 
+async function callRealPhotoTagger(photo, materialText) {
+  const { value } = await userConfig()
+  if (!value.apiKey || !value.visionModel || !value.baseUrl) throw new Error('请先在“模型设置”中配置支持图片理解的视觉模型')
+  let endpoint = value.baseUrl.replace(/\/+$/, '')
+  if (!endpoint.endsWith('/chat/completions')) endpoint += '/chat/completions'
+  const source = await imageDataUrl(resolveProjectFile(photo.relativePath))
+  const material = String(materialText || '').slice(0, 16_000)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 120_000)
+  let response
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${value.apiKey}` },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: value.visionModel,
+        temperature: 0.15,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: '你是严谨的业务实拍图片分析器。只描述图片真实可见内容，并结合用户提供的业务原始素材判断可能的业务关系。不得把推测写成事实，只输出合法 JSON。' },
+          { role: 'user', content: [
+            { type: 'text', text: `业务原始素材：\n${material || '未提供'}\n\n请分析这张业务实拍图片。originalDescription 只写画面可见事实；businessRelation 只有在原始素材能够支持时才填写。分类标签要短而稳定。visualTags.subjectPosition 使用 left/center/right 与 top/center/bottom 的组合；textSafeArea 只能是 top、bottom、left、right、none。输出：{"originalDescription":"图片原始描述","businessRelation":"与业务素材的关系","themeTags":["主题"],"sceneTags":["场景"],"subjectTags":["主体"],"actionTags":["动作"],"visualTags":{"orientation":"landscape|portrait|square","shotScale":"远景/中景/近景/特写","subjectPosition":"center","dominantColors":["颜色"],"quality":"high|medium|low","textSafeArea":"top|bottom|left|right|none"}}` },
+            { type: 'image_url', image_url: { url: source } },
+          ] },
+        ],
+      }),
+    })
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('实拍图片分析超过 2 分钟，请重试')
+    throw new Error(`无法连接视觉模型：${error.message}`)
+  } finally { clearTimeout(timeout) }
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`视觉模型返回 ${response.status}：${body.slice(0, 400)}`)
+  }
+  return sanitizeRealPhotoTags(parseModelJson(responseText(await response.json())))
+}
+
 async function callImageModel(brief, references) {
   const { value } = await userConfig()
   const settings = value.image
@@ -439,12 +500,31 @@ async function saveImageTaskArtifacts(task) {
     currentImageIds: task.currentImageIds || {},
     images: task.images,
     referenceImageIds: [...new Set(task.plan?.pages?.flatMap((page) => page.referenceImageIds || []) || [])],
+    sourcePhotoIds: [...new Set(task.plan?.pages?.flatMap((page) => page.sourcePhotoIds || []) || [])],
     updatedAt: task.updatedAt,
   })
 }
 
 function normalizeImageTask(value = {}) {
   const images = Array.isArray(value.images) ? value.images : []
+  if (value.mode === 'real_photo_poster' && Array.isArray(value.plan?.pages)) {
+    const pages = value.plan.pages.map((page, index) => ({
+      ...page,
+      id: String(page.id || `REAL-PAGE-${String(index + 1).padStart(2, '0')}`),
+      role: index === 0 ? 'cover' : 'content',
+      label: String(page.label || (index === 0 ? '封面' : `内容页 ${index}`)),
+      title: String(page.title || ''),
+      subtitle: String(page.subtitle || ''),
+      sourcePhotoIds: Array.isArray(page.sourcePhotoIds) ? page.sourcePhotoIds.map(String).slice(0, 4) : [],
+      referenceImageIds: [],
+    }))
+    const normalizedImages = images.map((image) => ({ ...image, pageId: image.pageId || pages[0]?.id || '' }))
+    const currentImageIds = { ...(value.currentImageIds || {}) }
+    for (const page of pages) {
+      if (!currentImageIds[page.id]) currentImageIds[page.id] = normalizedImages.filter((image) => image.pageId === page.id).at(-1)?.id || ''
+    }
+    return { ...value, mode: 'real_photo_poster', plan: { ...value.plan, pages }, images: normalizedImages, currentImageIds }
+  }
   if (Array.isArray(value.plan?.pages) && value.plan.pages.length) {
     const pages = value.plan.pages.map((page, index) => {
       const role = index === 0 ? 'cover' : page.role === 'summary' ? 'summary' : 'content'
@@ -566,6 +646,31 @@ async function createImagePlan(project, draft, onChunk = () => {}) {
   return sanitizeImagePlan(result, draft, project.imageReferences)
 }
 
+async function createRealPosterPlan(project, draft, onChunk = () => {}) {
+  const photos = project.realPhotos.filter((item) => item.enabled !== false && item.taggingStatus === 'ready')
+  if (!photos.length) throw new Error('请先到“素材管理 → 业务实拍”上传图片并等待分析完成')
+  const catalog = photos.map((item) => ({ id: item.id, width: item.width, height: item.height, tags: item.tags }))
+  const prompt = `请根据已确认的小红书文案，将业务实拍图片分成若干宣传图页面。
+
+核心规则：
+1. 先从已确认文案和业务原始素材中提取真正需要表达的主题，再选能共同表达同一主题的图片。
+2. 每页使用 1–4 张图片；不要为了凑数量加入弱相关图片。强主图可单独成页；全景+细节适合 2 张；一主两辅适合 3 张；同级场景集合适合 4 张。
+3. 同一图片不能重复出现在不同页面。仅颜色相近、都有人物或都在户外不能作为分组理由。
+4. 标题必须来自已确认文案和原始素材，不得添加新的奖项、级别、地点、效果、价格或承诺。主标题 6–16 字，副标题不超过 14 字。
+5. layoutTemplateId 按图片数量选择：1 张=single-full|single-caption；2 张=split-vertical|split-horizontal|hero-two；3 张=hero-three|left-three；4 张=grid-four|hero-four。
+6. textPosition 只能是 top 或 bottom；优先参考图片的 textSafeArea，避免遮挡主要人物、动作、建筑和道具。
+7. 每页必须给出 groupReason 和 evidenceQuotes，说明分组依据来自哪段原始素材或文案。没有文字依据的图片不要使用。
+
+业务原始素材：${project.material.content.slice(0, 20_000)}
+已确认业务事实：${JSON.stringify(project.facts)}
+已确认文案：${JSON.stringify(draft)}
+实拍图片目录：${JSON.stringify(catalog)}
+
+只输出 JSON：{"concept":"整套实拍宣传图主题","visualContinuity":"统一排版规则","pages":[{"promotionTheme":"本页共同主题","purpose":"本页作用","title":"主标题","subtitle":"副标题","sourcePhotoIds":["REALIMG-0001"],"groupReason":"为什么这些图片可以放在一起","evidenceQuotes":["文字依据"],"layoutTemplateId":"single-full","textPosition":"bottom","accentColor":"#ffd43b"}]}`
+  const result = await callModel(modelSystem, prompt, onChunk, false)
+  return sanitizeRealPosterPlan(result, draft, photos)
+}
+
 async function rewriteImagePage(project, task, page, feedback) {
   const currentImageId = task.currentImageIds?.[page.id]
   const currentImage = task.images.find((item) => item.id === currentImageId)
@@ -655,13 +760,15 @@ async function initializeProject(folder) {
   await fsp.mkdir(path.join(absolute, OUTPUT_DIR), { recursive: true })
   const meta = {
     schemaVersion: 1, name: cleanName(absolute), createdAt: now(), updatedAt: now(),
-    counters: { keywords: 0, references: 0, rules: 0, imageReferences: 0, strategies: 0, generations: 1, finalContents: 0 },
+    counters: { keywords: 0, references: 0, rules: 0, imageReferences: 0, realPhotos: 0, strategies: 0, generations: 1, finalContents: 0 },
   }
   await writeJson(path.join(absolute, MARKER), meta)
   for (const file of Object.values(assetFiles)) await writeJson(path.join(absolute, DATA_DIR, file), [])
   await writeJson(path.join(absolute, DATA_DIR, IMAGE_REFERENCES_FILE), [])
+  await writeJson(path.join(absolute, DATA_DIR, REAL_PHOTOS_FILE), [])
   await writeJson(path.join(absolute, DATA_DIR, FINAL_CONTENTS_FILE), [])
   await fsp.mkdir(path.join(absolute, DATA_DIR, IMAGE_REFERENCES_DIR), { recursive: true })
+  await fsp.mkdir(path.join(absolute, DATA_DIR, REAL_PHOTOS_DIR), { recursive: true })
   currentRoot = absolute
   await writeJson(outputPath('当前生成.json'), { id: 'GEN-0001', createdAt: now() })
   await writeJson(outputPath('生成记录.json'), [])
@@ -1189,6 +1296,130 @@ ipcMain.handle('image-reference:import-package', async () => {
   }
 })
 
+async function saveRealPhotos(items) {
+  await writeJson(dataPath(REAL_PHOTOS_FILE), items.map(normalizeRealPhoto))
+}
+
+async function retagRealPhoto(items, index, materialText) {
+  const photo = normalizeRealPhoto(items[index])
+  items[index] = { ...photo, taggingStatus: 'pending', taggingError: '', updatedAt: now() }
+  await saveRealPhotos(items)
+  try {
+    const tags = await callRealPhotoTagger(photo, materialText)
+    items[index] = { ...items[index], tags, taggingStatus: 'ready', taggingError: '', updatedAt: now() }
+  } catch (error) {
+    items[index] = { ...items[index], taggingStatus: 'failed', taggingError: error.message, updatedAt: now() }
+  }
+  await saveRealPhotos(items)
+  return items[index]
+}
+
+ipcMain.handle('real-photo:upload', async (event) => {
+  try {
+    if (!currentRoot) throw new Error('请先创建或打开项目')
+    const result = await dialog.showOpenDialog({
+      title: '上传业务实拍图片', buttonLabel: '上传并分析', properties: ['openFile', 'multiSelections'],
+      filters: [{ name: '图片', extensions: ['jpg', 'jpeg', 'png', 'webp'] }],
+    })
+    if (result.canceled || !result.filePaths.length) return { ok: false, error: '' }
+    if (result.filePaths.length > 20) throw new Error('单次最多上传 20 张业务实拍图片')
+    const items = (await readJson(dataPath(REAL_PHOTOS_FILE), [])).map(normalizeRealPhoto)
+    const existingHashes = new Set(items.map((item) => item.hash).filter(Boolean))
+    const meta = await readMeta()
+    meta.counters = meta.counters || {}
+    const createdIndexes = []
+    let skipped = 0
+    for (const source of result.filePaths) {
+      const buffer = await fsp.readFile(source)
+      if (!buffer.length) throw new Error(`${path.basename(source)} 是空文件`)
+      if (buffer.length > 10 * 1024 * 1024) throw new Error(`${path.basename(source)} 超过 10MB`)
+      const dimensions = nativeImage.createFromBuffer(buffer).getSize()
+      if (!dimensions.width || !dimensions.height) throw new Error(`${path.basename(source)} 不是可读取的图片`)
+      const hash = imageHash(buffer)
+      if (existingHashes.has(hash)) { skipped += 1; continue }
+      existingHashes.add(hash)
+      meta.counters.realPhotos = (meta.counters.realPhotos || 0) + 1
+      const id = `REALIMG-${String(meta.counters.realPhotos).padStart(4, '0')}`
+      const extension = path.extname(source).toLowerCase() || '.jpg'
+      const target = dataPath(path.join(REAL_PHOTOS_DIR, `${id}${extension}`))
+      await fsp.mkdir(path.dirname(target), { recursive: true })
+      await fsp.copyFile(source, target)
+      items.push(normalizeRealPhoto({
+        id, originalName: path.basename(source), relativePath: projectRelative(target), hash,
+        width: dimensions.width, height: dimensions.height, enabled: true,
+        taggingStatus: 'pending', tags: {}, createdAt: now(), updatedAt: now(),
+      }))
+      createdIndexes.push(items.length - 1)
+    }
+    await writeMeta(meta)
+    await saveRealPhotos(items)
+    event.sender.send('real-photo:progress', {
+      phase: 'added', current: 0, total: createdIndexes.length,
+      label: `已导入 ${createdIndexes.length} 张业务实拍，准备分析`,
+      photos: createdIndexes.map((index) => items[index]),
+    })
+    const materialFile = path.join(currentRoot, '业务原始素材.md')
+    const materialText = await exists(materialFile) ? await fsp.readFile(materialFile, 'utf8') : ''
+    let failed = 0
+    for (let position = 0; position < createdIndexes.length; position += 1) {
+      const index = createdIndexes[position]
+      event.sender.send('real-photo:progress', {
+        phase: 'analyzing', current: position + 1, total: createdIndexes.length,
+        label: `正在分析第 ${position + 1} 张业务实拍`, photo: items[index],
+      })
+      const tagged = await retagRealPhoto(items, index, materialText)
+      if (tagged.taggingStatus !== 'ready') failed += 1
+      event.sender.send('real-photo:progress', {
+        phase: 'item-done', current: position + 1, total: createdIndexes.length,
+        label: tagged.taggingStatus === 'ready' ? `第 ${position + 1} 张业务实拍分析完成` : `第 ${position + 1} 张业务实拍分析失败`,
+        photo: tagged,
+      })
+    }
+    event.sender.send('real-photo:progress', {
+      phase: 'done', current: createdIndexes.length, total: createdIndexes.length,
+      label: failed ? `分析完成，${failed} 张需要重试` : '所有业务实拍分析完成',
+    })
+    return { ok: true, imported: createdIndexes.length, skipped, failed, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
+})
+
+ipcMain.handle('real-photo:retag', async (_event, id) => {
+  try {
+    const items = (await readJson(dataPath(REAL_PHOTOS_FILE), [])).map(normalizeRealPhoto)
+    const index = items.findIndex((item) => item.id === String(id))
+    if (index < 0) throw new Error('没有找到要重新分析的实拍图片')
+    const materialFile = path.join(currentRoot, '业务原始素材.md')
+    const materialText = await exists(materialFile) ? await fsp.readFile(materialFile, 'utf8') : ''
+    const tagged = await retagRealPhoto(items, index, materialText)
+    if (tagged.taggingStatus !== 'ready') throw new Error(tagged.taggingError || '实拍图片分析失败')
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
+})
+
+ipcMain.handle('real-photo:toggle', async (_event, id, enabled) => {
+  try {
+    const items = (await readJson(dataPath(REAL_PHOTOS_FILE), [])).map(normalizeRealPhoto)
+    const index = items.findIndex((item) => item.id === String(id))
+    if (index < 0) throw new Error('没有找到要修改的实拍图片')
+    items[index] = { ...items[index], enabled: Boolean(enabled), updatedAt: now() }
+    await saveRealPhotos(items)
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('real-photo:delete', async (_event, id) => {
+  try {
+    const items = (await readJson(dataPath(REAL_PHOTOS_FILE), [])).map(normalizeRealPhoto)
+    const index = items.findIndex((item) => item.id === String(id))
+    if (index < 0) throw new Error('没有找到要删除的实拍图片')
+    const target = resolveProjectFile(items[index].relativePath)
+    if (await exists(target)) await fsp.unlink(target)
+    items.splice(index, 1)
+    await saveRealPhotos(items)
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
 ipcMain.handle('settings:get', async () => (await userConfig()).value)
 ipcMain.handle('clipboard:read-text', () => clipboard.readText())
 ipcMain.handle('settings:save', async (_event, settings) => {
@@ -1526,7 +1757,8 @@ ipcMain.handle('workflow:archive-final', async (_event, version, force = false) 
     const duplicate = active.find((item) => item.mode === mode && item.textHash === textHash)
     if (duplicate && !force) return { ok: false, error: `这篇文字与已入库内容 ${duplicate.id} 完全一致`, duplicateId: duplicate.id }
     const strategy = project.strategies.find((item) => item.id === draft.strategyId) || {}
-    const task = project.imageTasks.find((item) => item.draftVersion === draft.version && item.strategyId === draft.strategyId)
+    const candidateTasks = project.imageTasks.filter((item) => item.draftVersion === draft.version && item.strategyId === draft.strategyId)
+    const task = candidateTasks.find((item) => item.plan?.pages?.length && item.plan.pages.every((page) => item.currentImageIds?.[page.id])) || candidateTasks.at(-1)
     const imagePaths = task?.plan?.pages?.map((page) => task.images.find((image) => image.id === task.currentImageIds?.[page.id])?.relativePath).filter(Boolean) || []
     const meta = await readMeta()
     meta.counters = meta.counters || {}
@@ -1546,6 +1778,7 @@ ipcMain.handle('workflow:archive-final', async (_event, version, force = false) 
       referenceIds: draft.referenceIds,
       imageTaskId: task?.id || '',
       imagePaths,
+      imageMode: task?.mode || 'ai_generated',
       textHash,
       duplicateOverride: Boolean(force),
       archivedAt: now(),
@@ -1566,6 +1799,37 @@ ipcMain.handle('final-content:remove', async (_event, id) => {
     await writeJson(dataPath(FINAL_CONTENTS_FILE), items)
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('real-poster:create-plan', async (event, version) => {
+  const operation = `real-poster-plan:${Number(version) || 0}`
+  try {
+    const project = await loadProject()
+    const draft = project?.drafts.find((item) => item.version === Number(version) && item.confirmed)
+    if (!draft) throw new Error('请先确认这篇文案，再制作实拍宣传图')
+    const plan = await createRealPosterPlan(project, draft, modelStream(event, operation))
+    modelStreamDone(event, operation)
+    const taskId = `REAL-${project.currentGeneration.id}-${draft.strategyId}-V${draft.version}`
+    const tasks = [...project.imageTasks]
+    const index = tasks.findIndex((item) => item.id === taskId)
+    const previous = index >= 0 ? normalizeImageTask(tasks[index]) : null
+    const artifactDir = projectRelative(path.join(outputPath('配图'), project.currentGeneration.id, `${draft.strategyId}_v${draft.version}_real`))
+    const task = {
+      id: taskId, mode: 'real_photo_poster', generationId: project.currentGeneration.id,
+      strategyId: draft.strategyId, draftVersion: draft.version, plan, brief: null,
+      prompt: '', negativePrompt: '', artifactDir,
+      images: previous?.images || [], currentImageIds: {}, selectedImageId: '',
+      createdAt: previous?.createdAt || now(), updatedAt: now(),
+    }
+    if (index >= 0) tasks[index] = task
+    else tasks.push(task)
+    await saveImageTasks(tasks)
+    await saveImageTaskArtifacts(task)
+    return { ok: true, data: await loadProject(), taskId }
+  } catch (error) {
+    modelStreamDone(event, operation)
+    return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined }
+  }
 })
 
 ipcMain.handle('image:create-set', async (event, version) => {
@@ -1592,6 +1856,7 @@ ipcMain.handle('image:create-set', async (event, version) => {
       const artifactDir = projectRelative(path.join(outputPath('配图'), project.currentGeneration.id, `${draft.strategyId}_v${draft.version}`))
       task = {
         id: taskId,
+        mode: 'ai_generated',
         generationId: project.currentGeneration.id,
         strategyId: draft.strategyId,
         draftVersion: draft.version,
@@ -1662,6 +1927,41 @@ function findImageTaskContext(project, taskId) {
   }
   return null
 }
+
+ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl) => {
+  try {
+    const project = await loadProject()
+    const taskIndex = project.imageTasks.findIndex((item) => item.id === String(taskId))
+    if (taskIndex < 0) throw new Error('没有找到实拍宣传图任务')
+    const tasks = [...project.imageTasks]
+    const task = normalizeImageTask(tasks[taskIndex])
+    if (task.mode !== 'real_photo_poster') throw new Error('当前任务不是实拍宣传图')
+    const page = task.plan.pages.find((item) => item.id === String(pageId))
+    if (!page) throw new Error('没有找到要保存的宣传图页面')
+    const match = String(dataUrl || '').match(/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/)
+    if (!match) throw new Error('宣传图渲染结果格式不正确')
+    const buffer = Buffer.from(match[1], 'base64')
+    if (!buffer.length || buffer.length > 30 * 1024 * 1024) throw new Error('宣传图渲染结果为空或过大')
+    const folder = resolveProjectFile(task.artifactDir)
+    const revision = task.images.filter((item) => item.pageId === page.id).length + 1
+    const stamp = Date.now()
+    const file = path.join(folder, `${page.id.toLowerCase()}-v${String(revision).padStart(2, '0')}-${stamp}.png`)
+    await writeBuffer(file, buffer)
+    const image = {
+      id: `${task.id}-${page.id}-${stamp}`, pageId: page.id, revision, feedback: '',
+      relativePath: projectRelative(file), createdAt: now(), model: 'local-canvas', size: '1080x1440',
+      seed: 0, requestId: '', prompt: page.title, negativePrompt: '', referenceImageIds: [],
+      sourcePhotoIds: page.sourcePhotoIds, renderType: 'real_photo_poster',
+    }
+    task.images = [...task.images, image]
+    task.currentImageIds = { ...task.currentImageIds, [page.id]: image.id }
+    task.updatedAt = now()
+    tasks[taskIndex] = task
+    await saveImageTasks(tasks)
+    await saveImageTaskArtifacts(task)
+    return { ok: true, data: await loadProject() }
+  } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
+})
 
 ipcMain.handle('image:regenerate-page', async (event, taskId, pageId, feedback) => {
   try {

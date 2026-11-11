@@ -5,10 +5,11 @@ import {
   PackageOpen, PenLine, Plus, RefreshCw, Save, Scale, Settings, SlidersHorizontal,
   Sparkles, Trash2, Upload, WandSparkles, X,
 } from 'lucide-react'
+import { renderRealPosterPage } from './real-poster-renderer'
 
 type Page = 'generate' | 'library' | 'assets' | 'settings'
 type Modal = 'project-init' | AssetKind | null
-type AssetLibraryTab = AssetKind | 'imageReferences'
+type AssetLibraryTab = AssetKind | 'imageReferences' | 'realPhotos'
 
 const MarkdownReadingView = lazy(() => import('./MarkdownReadingView'))
 
@@ -77,6 +78,7 @@ function App() {
   const [stream, setStream] = useState({ operation: '', content: '', thinking: '', done: false })
   const [imageProgress, setImageProgress] = useState<Record<string, ImageProgressEvent>>({})
   const [referenceProgress, setReferenceProgress] = useState<ImageReferenceProgressEvent | null>(null)
+  const [realPhotoProgress, setRealPhotoProgress] = useState<RealPhotoProgressEvent | null>(null)
   const [materialFiles, setMaterialFiles] = useState<MaterialUploadFile[]>([])
   const [materialUploadOpen, setMaterialUploadOpen] = useState(false)
 
@@ -199,6 +201,22 @@ function App() {
         else imageReferences.push(update)
       }
       return { ...current, imageReferences }
+    })
+  }), [])
+
+  useEffect(() => window.workshop.onRealPhotoProgress((payload) => {
+    setRealPhotoProgress(payload)
+    const updates = payload.photos || (payload.photo ? [payload.photo] : [])
+    if (!updates.length) return
+    setProject((current) => {
+      if (!current) return current
+      const realPhotos = [...current.realPhotos]
+      for (const update of updates) {
+        const index = realPhotos.findIndex((item) => item.id === update.id)
+        if (index >= 0) realPhotos[index] = update
+        else realPhotos.push(update)
+      }
+      return { ...current, realPhotos }
     })
   }), [])
 
@@ -328,7 +346,7 @@ function App() {
     setModal(kind)
   }
   async function saveAsset() {
-    if (assetTab === 'imageReferences') return
+    if (assetTab === 'imageReferences' || assetTab === 'realPhotos') return
     const required = assetTab === 'keywords' ? form.root : assetTab === 'rules' ? form.prohibited : form.title && form.body
     if (!required?.trim()) {
       setError(assetTab === 'keywords' ? '核心关键词/词根为必填项' : assetTab === 'rules' ? '禁用词/敏感表述为必填项' : '标题和正文为必填项')
@@ -406,6 +424,59 @@ function App() {
   async function deleteImageReference(id: string) {
     if (!window.confirm(`确定删除参考图片 ${id}？图片文件也会从项目素材中移除。`)) return
     await run(`delete-image-reference-${id}`, () => window.workshop.deleteImageReference(id), '参考图片已删除')
+  }
+  async function uploadRealPhotos() {
+    setRealPhotoProgress(null)
+    setBusy('upload-real-photos'); setError('')
+    try {
+      const result = await window.workshop.uploadRealPhotos()
+      if (result.data) setProject(result.data)
+      if (!result.ok) { showError(result.error); return }
+      const skipped = result.skipped ? `，跳过 ${result.skipped} 张重复图片` : ''
+      const failed = result.failed ? `，${result.failed} 张分析失败` : ''
+      flash(`已导入 ${result.imported || 0} 张业务实拍${skipped}${failed}`)
+    } catch (e) { showError(e instanceof Error ? e.message : '业务实拍上传失败') }
+    finally { setBusy('') }
+  }
+  async function retagRealPhoto(id: string) {
+    await run(`retag-real-photo-${id}`, () => window.workshop.retagRealPhoto(id), '实拍图片描述与标签已更新')
+  }
+  async function toggleRealPhoto(id: string, enabled: boolean) {
+    await run(`toggle-real-photo-${id}`, () => window.workshop.toggleRealPhoto(id, enabled))
+  }
+  async function deleteRealPhoto(id: string) {
+    if (!window.confirm(`确定删除业务实拍 ${id}？原图也会从当前项目中移除。`)) return
+    await run(`delete-real-photo-${id}`, () => window.workshop.deleteRealPhoto(id), '业务实拍已删除')
+  }
+  async function createRealPosterSet(version: number) {
+    setBusy('real-poster-set'); setError('')
+    try {
+      const planned = await window.workshop.createRealPosterPlan(version)
+      if (planned.data) setProject(planned.data)
+      if (!planned.ok || !planned.data) { showError(planned.error); return false }
+      let current = planned.data
+      const task = current.imageTasks.find((item) => item.id === planned.taskId || (item.mode === 'real_photo_poster' && item.draftVersion === version))
+      if (!task) throw new Error('实拍宣传图策划已生成，但没有找到对应任务')
+      const photoIds = [...new Set(task.plan.pages.flatMap((page) => page.sourcePhotoIds || []))]
+      const entries = await Promise.all(photoIds.map(async (id) => {
+        const photo = current.realPhotos.find((item) => item.id === id)
+        if (!photo) throw new Error(`没有找到实拍素材 ${id}`)
+        const result = await window.workshop.readGeneratedImage(photo.relativePath)
+        if (!result.ok || !result.imageUrl) throw new Error(result.error || `无法读取实拍素材 ${id}`)
+        return [id, result.imageUrl] as const
+      }))
+      const sources = Object.fromEntries(entries)
+      for (const page of task.plan.pages) {
+        const dataUrl = await renderRealPosterPage(page, current.realPhotos, sources)
+        const saved = await window.workshop.saveRealPosterPage(task.id, page.id, dataUrl)
+        if (!saved.ok || !saved.data) throw new Error(saved.error || `保存${page.label}失败`)
+        current = saved.data
+        setProject(current)
+      }
+      flash('实拍宣传图已完成并保存到项目')
+      return true
+    } catch (e) { showError(e instanceof Error ? e.message : '实拍宣传图制作失败'); return false }
+    finally { setBusy('') }
   }
   async function deleteAsset(kind: AssetKind, id: string) {
     if (!window.confirm(`确定删除 ${id}？该编号之后不会再分配给新记录。`)) return
@@ -515,19 +586,21 @@ function App() {
           saveManual={async (value) => { const ok = await run('manual', () => window.workshop.saveManualDraft(value), '手动修改已保存为新版本'); return ok }}
           confirm={(version) => run('confirm', () => window.workshop.confirmDraft(version), '当前文案已确认')}
           createImageSet={(version) => run('image-set', () => window.workshop.createImageSet(version), '整套配图已生成并保存到项目')}
+          createRealPosterSet={createRealPosterSet}
           regenerateImage={(taskId, pageId, feedback) => run(`image-regenerate:${pageId}`, () => window.workshop.regenerateImagePage(taskId, pageId, feedback), feedback ? '已按建议生成新版本' : '已改写提示词并生成新版本')}
           exportImage={async (taskId, imageId) => { const result = await window.workshop.exportGeneratedImage(taskId, imageId); if (!result.ok) showError(result.error); else if (result.savedPath) flash('图片已导出') }}
           exportImageSet={async (taskId) => { const result = await window.workshop.exportImageSet(taskId); if (!result.ok) showError(result.error); else if (result.savedPath) flash('整套图片已导出') }}
           goReferenceLibrary={() => { setPage('assets'); setAssetTab('imageReferences') }}
+          goRealPhotoLibrary={() => { setPage('assets'); setAssetTab('realPhotos') }}
           archiveFinal={archiveFinal}
         />}
         {page === 'library' && <FinalLibraryPage project={project} chooseFolder={chooseFolder} remove={removeFinalContent} />}
-        {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} materialFiles={materialFiles} selectMaterialFiles={() => setMaterialUploadOpen(true)} addDroppedMaterialFiles={addDroppedMaterialFiles} removeMaterialFile={removeMaterialFile} clearMaterialFiles={() => setMaterialFiles([])} extractMaterial={extractMaterial} exportMaterial={exportMaterial} downloadAssetTemplate={downloadAssetTemplate} importAssetBatch={importAssetBatch} exportAsset={exportAsset} busy={busy} referenceProgress={referenceProgress} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={(kind, id, enabled) => run('toggle-asset', () => window.workshop.toggleAsset(kind, id, enabled))} uploadImageReferences={uploadImageReferences} importImageReferencePackage={importImageReferencePackage} exportImageReferencePackage={exportImageReferencePackage} retagImageReference={retagImageReference} setImageReferenceRole={setImageReferenceRole} toggleImageReference={toggleImageReference} deleteImageReference={deleteImageReference} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
+        {page === 'assets' && <AssetsPage project={project} chooseFolder={chooseFolder} importMaterial={importMaterial} materialFiles={materialFiles} selectMaterialFiles={() => setMaterialUploadOpen(true)} addDroppedMaterialFiles={addDroppedMaterialFiles} removeMaterialFile={removeMaterialFile} clearMaterialFiles={() => setMaterialFiles([])} extractMaterial={extractMaterial} exportMaterial={exportMaterial} downloadAssetTemplate={downloadAssetTemplate} importAssetBatch={importAssetBatch} exportAsset={exportAsset} busy={busy} referenceProgress={referenceProgress} realPhotoProgress={realPhotoProgress} tab={assetTab} setTab={setAssetTab} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={(kind, id, enabled) => run('toggle-asset', () => window.workshop.toggleAsset(kind, id, enabled))} uploadImageReferences={uploadImageReferences} importImageReferencePackage={importImageReferencePackage} exportImageReferencePackage={exportImageReferencePackage} retagImageReference={retagImageReference} setImageReferenceRole={setImageReferenceRole} toggleImageReference={toggleImageReference} deleteImageReference={deleteImageReference} uploadRealPhotos={uploadRealPhotos} retagRealPhoto={retagRealPhoto} toggleRealPhoto={toggleRealPhoto} deleteRealPhoto={deleteRealPhoto} goGenerate={() => { setPage('generate'); setFlowStep(project?.facts ? 3 : 2) }} />}
         {page === 'assets' && busy === 'material-ai' && <OcrStreamPreview content={stream.operation === 'material-ai' ? stream.content : ''} fileCount={materialFiles.length} />}
         {page === 'settings' && <SettingsPage settings={settings} setSettings={setSettings} save={saveSettings} busy={busy} />}
       </main>
 
-      <Overlays {...{ modal, setModal, pendingFolder, initialize, busy, error, setError, assetTab: assetTab === 'imageReferences' ? 'keywords' : assetTab, form, setForm, saveAsset }} />
+      <Overlays {...{ modal, setModal, pendingFolder, initialize, busy, error, setError, assetTab: assetTab === 'imageReferences' || assetTab === 'realPhotos' ? 'keywords' : assetTab, form, setForm, saveAsset }} />
       {materialUploadOpen && <MaterialUploadModal files={materialFiles} selectFiles={selectMaterialFiles} addDroppedFiles={addDroppedMaterialFiles} removeFile={removeMaterialFile} clearFiles={() => setMaterialFiles([])} start={extractMaterial} close={() => setMaterialUploadOpen(false)} busy={busy} />}
       <Toast error={error} notice={notice} clear={() => setError('')} />
     </div>
@@ -558,16 +631,18 @@ type GenerationPageProps = {
   saveManual: (draft: { version: number; title: string; body: string; hashtags: string }) => Promise<boolean>;
   confirm: (version: number) => void;
   createImageSet: (version: number) => Promise<boolean>;
+  createRealPosterSet: (version: number) => Promise<boolean>;
   regenerateImage: (taskId: string, pageId: string, feedback: string) => Promise<boolean>;
   exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void;
   goReferenceLibrary: () => void;
+  goRealPhotoLibrary: () => void;
   archiveFinal: (version: number) => Promise<boolean>;
 }
 
 function imageTaskComplete(task?: ImageTask) {
   if (!task) return false
   const pages = task.plan?.pages || []
-  return pages.length >= 4 && pages.every((page) => Boolean(task.currentImageIds?.[page.id]))
+  return pages.length >= (task.mode === 'real_photo_poster' ? 1 : 4) && pages.every((page) => Boolean(task.currentImageIds?.[page.id]))
 }
 
 function archivedCompleted(record: GenerationRecord) {
@@ -637,7 +712,7 @@ function CurrentFlow(props: GenerationPageProps) {
   if (flowStep === 4) return <StrategyStep project={project} busy={props.busy} thinking={props.thinkingModes.strategies} setThinking={(value) => props.setThinkingMode('strategies', value)} generate={props.generateStrategies} choice={props.choice} setChoice={props.setChoice} strategyAdvice={props.strategyAdvice} setStrategyAdvice={props.setStrategyAdvice} save={props.saveStrategy} />
   if (flowStep === 5) return <ComposeStep project={project} strategies={props.selectedStrategies} busy={props.busy} thinking={props.thinkingModes.draft} setThinking={(value) => props.setThinkingMode('draft', value)} generate={props.generateDraft} back={() => props.setFlowStep(4)} />
   if (flowStep === 6) return <ReviewStep key={props.draft?.version ?? 'empty'} project={project} draft={props.draft} viewVersion={props.viewVersion} setViewVersion={props.setViewVersion} revision={props.revision} setRevision={props.setRevision} busy={props.busy} thinking={props.thinkingModes.revise} setThinking={(value) => props.setThinkingMode('revise', value)} revise={props.revise} saveManual={props.saveManual} confirm={props.confirm} goImages={() => props.setFlowStep(7)} />
-  if (flowStep === 7) return <ImageStep project={project} busy={props.busy} stream={props.stream} imageProgress={props.imageProgress} createImageSet={props.createImageSet} regenerateImage={props.regenerateImage} exportImage={props.exportImage} exportImageSet={props.exportImageSet} goReferenceLibrary={props.goReferenceLibrary} goArchive={() => props.setFlowStep(8)} />
+  if (flowStep === 7) return <ImageStep project={project} busy={props.busy} stream={props.stream} imageProgress={props.imageProgress} createImageSet={props.createImageSet} createRealPosterSet={props.createRealPosterSet} regenerateImage={props.regenerateImage} exportImage={props.exportImage} exportImageSet={props.exportImageSet} goReferenceLibrary={props.goReferenceLibrary} goRealPhotoLibrary={props.goRealPhotoLibrary} goArchive={() => props.setFlowStep(8)} />
   return <ArchiveStep project={project} busy={props.busy} archiveFinal={props.archiveFinal} goImages={() => props.setFlowStep(7)} />
 }
 
@@ -726,112 +801,104 @@ function ReviewStep({ project, draft, viewVersion, setViewVersion, revision, set
   </section>
 }
 
-function ImageStep({ project, busy, stream, imageProgress, createImageSet, regenerateImage, exportImage, exportImageSet, goReferenceLibrary, goArchive }: {
-  project: ProjectData; busy: string; stream: { operation: string; content: string; thinking: string; done: boolean }; imageProgress: Record<string, ImageProgressEvent>; createImageSet: (version: number) => Promise<boolean>;
+function ImageStep({ project, busy, stream, imageProgress, createImageSet, createRealPosterSet, regenerateImage, exportImage, exportImageSet, goReferenceLibrary, goRealPhotoLibrary, goArchive }: {
+  project: ProjectData; busy: string; stream: { operation: string; content: string; thinking: string; done: boolean }; imageProgress: Record<string, ImageProgressEvent>;
+  createImageSet: (version: number) => Promise<boolean>; createRealPosterSet: (version: number) => Promise<boolean>;
   regenerateImage: (taskId: string, pageId: string, feedback: string) => Promise<boolean>;
-  exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void; goReferenceLibrary: () => void; goArchive: () => void;
+  exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void;
+  goReferenceLibrary: () => void; goRealPhotoLibrary: () => void; goArchive: () => void;
 }) {
   const confirmedDrafts = project.selectedStrategyIds.map((strategyId) => project.drafts.find((item) => item.strategyId === strategyId && item.confirmed)).filter(Boolean) as Draft[]
   const [selectedVersion, setSelectedVersion] = useState(confirmedDrafts[0]?.version || 0)
+  const [imageMode, setImageMode] = useState<'ai_generated' | 'real_photo_poster'>('ai_generated')
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({})
   const [feedbacks, setFeedbacks] = useState<Record<string, string>>({})
   const [editingPage, setEditingPage] = useState('')
   const planningStreamRef = useRef<HTMLPreElement>(null)
   const draft = confirmedDrafts.find((item) => item.version === selectedVersion) || confirmedDrafts[0]
-  const task = project.imageTasks.find((item) => item.draftVersion === draft?.version && item.strategyId === draft?.strategyId)
+  const task = project.imageTasks.find((item) => item.draftVersion === draft?.version && item.strategyId === draft?.strategyId && (item.mode || 'ai_generated') === imageMode)
+  const isReal = imageMode === 'real_photo_poster'
   const versionProgress = draft ? imageProgress[`version:${draft.version}`] : undefined
   const taskProgress = task ? imageProgress[`task:${task.id}`] : undefined
-  // Planning can arrive before a task exists; once drawing starts, the task-scoped event survives page unmounts.
   const progress = busy === 'image-set' && versionProgress?.phase === 'planning' ? versionProgress : taskProgress || versionProgress || null
+  const planningContent = stream.operation === `${isReal ? 'real-poster-plan' : 'image-plan'}:${draft?.version || 0}` ? stream.content : ''
 
-  useEffect(() => {
-    if (!draft && confirmedDrafts[0]) setSelectedVersion(confirmedDrafts[0].version)
-  }, [draft, confirmedDrafts])
-
-  const planningContent = stream.operation === `image-plan:${draft?.version || 0}` ? stream.content : ''
-  useEffect(() => {
-    if (planningStreamRef.current) planningStreamRef.current.scrollTop = planningStreamRef.current.scrollHeight
-  }, [planningContent])
-
+  useEffect(() => { if (!draft && confirmedDrafts[0]) setSelectedVersion(confirmedDrafts[0].version) }, [draft, confirmedDrafts])
+  useEffect(() => { if (planningStreamRef.current) planningStreamRef.current.scrollTop = planningStreamRef.current.scrollHeight }, [planningContent])
   useEffect(() => {
     let active = true
     const currentImages = task?.plan.pages.map((page) => task.images.find((image) => image.id === task.currentImageIds?.[page.id])).filter(Boolean) as GeneratedImage[] || []
-    const referenceIds = [...new Set(task?.plan.pages.flatMap((page) => page.referenceImageIds || []) || [])]
-    const referenceImages = referenceIds.map((id) => project.imageReferences.find((item) => item.id === id)).filter(Boolean) as ImageReference[]
-    Promise.all([...currentImages, ...referenceImages].map(async (image) => {
+    const supportImages = isReal
+      ? [...new Set(task?.plan.pages.flatMap((page) => page.sourcePhotoIds || []) || [])].map((id) => project.realPhotos.find((item) => item.id === id)).filter(Boolean) as RealPhoto[]
+      : [...new Set(task?.plan.pages.flatMap((page) => page.referenceImageIds || []) || [])].map((id) => project.imageReferences.find((item) => item.id === id)).filter(Boolean) as ImageReference[]
+    Promise.all([...currentImages, ...supportImages].map(async (image) => {
       const result = await window.workshop.readGeneratedImage(image.relativePath)
       return [image.id, result.ok ? result.imageUrl || '' : ''] as const
     })).then((entries) => { if (active) setImageUrls(Object.fromEntries(entries)) })
     return () => { active = false }
-  }, [task?.id, task?.updatedAt, selectedVersion, project.imageReferences])
+  }, [task?.id, task?.updatedAt, selectedVersion, imageMode, project.imageReferences, project.realPhotos])
 
   if (!confirmedDrafts.length) return <section className="flow-panel surface-card"><StepHeader step="步骤 7 / 8" title="制作小红书配图">配图只会使用已经确认的文案和业务事实。</StepHeader><Gate icon={<ImageIcon size={25} />} message="还没有已确认的文案" target="请先回到上一步确认文案。" /></section>
   if (!draft) return null
 
   const pages = task?.plan.pages || []
   const readyCount = pages.filter((page) => task?.currentImageIds?.[page.id]).length
-  const generatingSet = busy === 'image-set'
+  const generatingSet = busy === 'image-set' || busy === 'real-poster-set'
   const usableReferences = project.imageReferences.filter((item) => item.enabled && item.taggingStatus === 'ready')
-  const allIllustrated = confirmedDrafts.every((item) => imageTaskComplete(project.imageTasks.find((imageTask) => imageTask.draftVersion === item.version)))
+  const usableRealPhotos = project.realPhotos.filter((item) => item.enabled && item.taggingStatus === 'ready')
+  const ready = isReal ? usableRealPhotos.length > 0 : usableReferences.length > 0
+  const hasPlan = Boolean(task && pages.length >= (isReal ? 1 : 4))
+  const allIllustrated = confirmedDrafts.every((item) => project.imageTasks.some((candidate) => candidate.draftVersion === item.version && imageTaskComplete(candidate)))
 
   return <section className="flow-panel image-workspace surface-card">
     <StepHeader step="步骤 7 / 8" title="制作小红书配图" action={task && readyCount > 0 && <button className="secondary compact" onClick={() => exportImageSet(task.id)} disabled={!!busy}><Download size={15} />导出整套</button>}>
-      系统会先根据文字标签选择 1–3 张优秀样本，再以图生图方式生成封面和内容页；样本只提供视觉方法，本篇事实不会被替换。
+      选择 AI 生成新画面，或直接使用业务实拍图片进行分组、拼接和艺术字排版。
     </StepHeader>
-    {!usableReferences.length && <div className="reference-readiness"><ImageIcon size={20} /><div><b>先建立小红书图片参考库</b><span>上传你认可的封面和内容页，系统完成视觉打标后才会开始生成；不会退回文生图。</span></div><button className="secondary compact" onClick={goReferenceLibrary}><Upload size={15} />去上传样本</button></div>}
+    <div className="image-mode-switch" role="group" aria-label="配图制作方式">
+      <button className={!isReal ? 'active' : ''} onClick={() => setImageMode('ai_generated')}><WandSparkles size={18} /><span><b>AI 生成套图</b><small>按参考样本生成新画面</small></span></button>
+      <button className={isReal ? 'active real' : 'real'} onClick={() => setImageMode('real_photo_poster')}><ImageIcon size={18} /><span><b>实拍宣传图</b><small>原图拼接并覆盖艺术字</small></span></button>
+    </div>
+    {!ready && <div className="reference-readiness"><ImageIcon size={20} /><div><b>{isReal ? '先建立业务实拍图库' : '先建立小红书图片参考库'}</b><span>{isReal ? '上传真实业务照片，系统会结合业务原始素材生成描述和分类标签。' : '上传你认可的封面和内容页，完成视觉打标后再生成。'}</span></div><button className="secondary compact" onClick={isReal ? goRealPhotoLibrary : goReferenceLibrary}><Upload size={15} />去上传{isReal ? '实拍' : '样本'}</button></div>}
     <div className="image-document-tabs">{confirmedDrafts.map((item, index) => {
-      const itemTask = project.imageTasks.find((candidate) => candidate.draftVersion === item.version)
-      const done = imageTaskComplete(itemTask)
-      const count = itemTask?.plan.pages.filter((page) => itemTask.currentImageIds?.[page.id]).length || 0
+      const itemTasks = project.imageTasks.filter((candidate) => candidate.draftVersion === item.version)
+      const done = itemTasks.some(imageTaskComplete)
+      const count = Math.max(0, ...itemTasks.map((candidate) => candidate.plan.pages.filter((page) => candidate.currentImageIds?.[page.id]).length))
       return <button key={item.version} className={item.version === draft.version ? 'active' : ''} onClick={() => setSelectedVersion(item.version)}><span>{documentLabel(index)}</span><b>{item.title}</b>{done ? <CheckCircle2 size={15} /> : <small>{count ? `${count} 张已完成` : '待生成'}</small>}</button>
     })}</div>
 
-    {generatingSet && (!task || pages.length < 4) ? <div className="image-planning-stage" aria-live="polite">
-      <div className="planning-copy"><span><LoaderCircle className="spin" size={17} /></span><div><b>{progress?.label || '正在拆解文案与翻页节奏'}</b><small>先展开画布，规划完成后会逐张呈现成品</small></div></div>
-      <div className="planning-stream"><div><Sparkles size={14} /><span>套图策划实时输出</span><small>{stream.done ? '正在整理策划结果' : '生成中'}</small></div><pre ref={planningStreamRef}>{planningContent || '正在读取已确认文案、业务事实与参考图片标签…'}</pre><i aria-hidden="true" /></div>
-    </div> : !task || pages.length < 4 ? <ActionState
-      icon={<ImagePlus size={27} />}
-      title={`为「${draft.title}」生成整套配图`}
-      description="系统会先拆解翻页叙事，并从参考库中为每一页选择最合适的视觉样本。通常生成 4–6 张，每页都保留参考来源。"
-      button={<button className="primary" onClick={() => createImageSet(draft.version)} disabled={!!busy || !usableReferences.length}>{generatingSet ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}{generatingSet ? progress?.label || '正在生成整套配图' : '按参考样本生成整套配图'}</button>}
+    {generatingSet && !hasPlan ? <div className="image-planning-stage" aria-live="polite">
+      <div className="planning-copy"><span><LoaderCircle className="spin" size={17} /></span><div><b>{isReal ? '正在按宣传主题分组实拍图片' : progress?.label || '正在拆解文案与翻页节奏'}</b><small>{isReal ? '分组完成后会在本地自动裁剪、拼接并绘制艺术字' : '先展开画布，规划完成后会逐张呈现成品'}</small></div></div>
+      <div className="planning-stream"><div><Sparkles size={14} /><span>{isReal ? '实拍分组实时输出' : '套图策划实时输出'}</span><small>{stream.done ? '正在整理结果' : '生成中'}</small></div><pre ref={planningStreamRef}>{planningContent || (isReal ? '正在读取业务原始素材、已确认文案和实拍图片标签…' : '正在读取已确认文案、业务事实与参考图片标签…')}</pre><i aria-hidden="true" /></div>
+    </div> : !hasPlan ? <ActionState
+      icon={isReal ? <LayoutTemplate size={27} /> : <ImagePlus size={27} />}
+      title={isReal ? `为「${draft.title}」制作实拍宣传图` : `为「${draft.title}」生成整套配图`}
+      description={isReal ? '系统会先按共同宣传主题分组，再从单图、双图、三图和四图模板中选择合适版式，在本地准确绘制中文艺术字。' : '系统会先拆解翻页叙事，并从参考库中为每一页选择最合适的视觉样本。通常生成 4–6 张。'}
+      button={<button className="primary" onClick={() => isReal ? createRealPosterSet(draft.version) : createImageSet(draft.version)} disabled={!!busy || !ready}>{generatingSet ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}{generatingSet ? '正在制作' : isReal ? '用实拍图片制作' : '按参考样本生成整套配图'}</button>}
     /> : <>
-      <div className="storyboard-head">
-        <div><span>套图思路</span><h3>{task.plan.concept}</h3><p>{task.plan.visualContinuity}</p></div>
-        <div className="storyboard-progress"><b>{readyCount}/{pages.length}</b><span>张已完成</span></div>
-      </div>
-
-      {generatingSet && <div className="set-generation-progress" aria-live="polite"><LoaderCircle className="spin" size={18} /><span><b>{progress?.label || '正在生成整套配图'}</b><small>{progress?.total ? `已呈现 ${readyCount} 张，共 ${pages.length} 张` : '正在拆解文案与翻页顺序'}</small></span><div className="generation-meter"><i style={{ width: `${pages.length ? (readyCount / pages.length) * 100 : 0}%` }} /></div></div>}
-
+      <div className="storyboard-head"><div><span>{isReal ? '实拍分组思路' : '套图思路'}</span><h3>{task!.plan.concept}</h3><p>{task!.plan.visualContinuity}</p></div><div className="storyboard-progress"><b>{readyCount}/{pages.length}</b><span>张已完成</span></div></div>
+      {generatingSet && <div className="set-generation-progress" aria-live="polite"><LoaderCircle className="spin" size={18} /><span><b>{isReal ? '正在本地拼接并绘制艺术字' : progress?.label || '正在生成整套配图'}</b><small>{`已完成 ${readyCount} 张，共 ${pages.length} 张`}</small></span><div className="generation-meter"><i style={{ width: `${pages.length ? (readyCount / pages.length) * 100 : 0}%` }} /></div></div>}
       <div className="storyboard-grid">{pages.map((page, index) => {
-        const imageId = task.currentImageIds?.[page.id]
-        const image = task.images.find((item) => item.id === imageId)
-        const revisions = task.images.filter((item) => item.pageId === page.id).length
-        const references = (page.referenceImageIds || []).map((id) => project.imageReferences.find((item) => item.id === id)).filter(Boolean) as ImageReference[]
-        const regenerating = busy === `image-regenerate:${page.id}`
-        const generating = generatingSet && !image && progress?.phase === 'generating' && progress.pageId === page.id
-        const queued = generatingSet && !image && !generating
+        const imageId = task!.currentImageIds?.[page.id]
+        const image = task!.images.find((item) => item.id === imageId)
+        const revisions = task!.images.filter((item) => item.pageId === page.id).length
+        const references = isReal
+          ? (page.sourcePhotoIds || []).map((id) => project.realPhotos.find((item) => item.id === id)).filter(Boolean) as RealPhoto[]
+          : (page.referenceImageIds || []).map((id) => project.imageReferences.find((item) => item.id === id)).filter(Boolean) as ImageReference[]
+        const regenerating = !isReal && busy === `image-regenerate:${page.id}`
+        const generating = generatingSet && !image
         const editing = editingPage === page.id
         return <article key={page.id} className={`story-page ${page.role === 'cover' ? 'cover' : ''} ${generating ? 'is-generating' : ''} ${imageUrls[image?.id || ''] ? 'is-revealed' : ''}`}>
-          <div className="story-image">
-            {image && imageUrls[image.id] ? <img src={imageUrls[image.id]} alt={`${page.label}：${page.title}`} /> : generating ? <div className="story-image-empty generation-canvas"><div className="canvas-orb" /><i className="canvas-scan" /><LoaderCircle className="spin" size={22} /><b>正在绘制{page.label}</b><span>完成后会在这里直接呈现</span></div> : image ? <div className="story-image-empty generation-canvas resolving"><LoaderCircle className="spin" size={22} /><b>正在呈现成品</b></div> : <div className={`story-image-empty ${queued ? 'queued' : ''}`}><ImageIcon size={25} /><span>{queued ? '已排入生成队列' : '等待生成'}</span></div>}
-            <span className="story-index">{String(index + 1).padStart(2, '0')}</span>
-            <span className="story-role">{page.label}</span>
-            {regenerating && <div className="story-image-busy"><LoaderCircle className="spin" size={25} /><b>{progress?.pageId === page.id ? progress.label : `正在更新${page.label}`}</b><span>会先重写提示词，再生成图片</span></div>}
-          </div>
-          <div className="story-copy"><div><h3>{page.title}</h3><p>{page.purpose}</p></div><span>版本 {Math.max(1, revisions)}</span></div>
-          <div className="story-references"><span>本页参考</span><div>{references.map((reference) => <span key={reference.id} title={reference.tags.summary}>{imageUrls[reference.id] ? <img src={imageUrls[reference.id]} alt={reference.tags.summary} /> : <ImageIcon size={14} />}<small>{reference.id}</small></span>)}</div></div>
-          <div className="story-actions">
-            <button className="text-button" onClick={() => image && exportImage(task.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button>
-            <button className="secondary compact" onClick={() => regenerateImage(task.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button>
-            <button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button>
-          </div>
-          {editing && <div className="story-feedback"><label htmlFor={`feedback-${page.id}`}>你希望怎么改？</label><textarea id={`feedback-${page.id}`} rows={3} value={feedbacks[page.id] || ''} onChange={(event) => setFeedbacks({ ...feedbacks, [page.id]: event.target.value })} placeholder="例如：标题再醒目一点，改成真实行李与手册的俯拍画面" /><button className="primary compact" onClick={async () => { const ok = await regenerateImage(task.id, page.id, feedbacks[page.id] || ''); if (ok) { setEditingPage(''); setFeedbacks({ ...feedbacks, [page.id]: '' }) } }} disabled={!feedbacks[page.id]?.trim() || !!busy}><WandSparkles size={14} />按要求重新生成</button></div>}
+          <div className="story-image">{image && imageUrls[image.id] ? <img src={imageUrls[image.id]} alt={`${page.label}：${page.title}`} /> : <div className={`story-image-empty ${generating ? 'generation-canvas' : ''}`}>{generating ? <><div className="canvas-orb" /><i className="canvas-scan" /><LoaderCircle className="spin" size={22} /><b>正在制作{page.label}</b></> : <><ImageIcon size={25} /><span>等待生成</span></>}</div>}<span className="story-index">{String(index + 1).padStart(2, '0')}</span><span className="story-role">{page.label}</span>{regenerating && <div className="story-image-busy"><LoaderCircle className="spin" size={25} /><b>正在更新{page.label}</b></div>}</div>
+          <div className="story-copy"><div><h3>{page.title}</h3><p>{isReal ? page.groupReason || page.purpose : page.purpose}</p></div><span>版本 {Math.max(1, revisions)}</span></div>
+          <div className="story-references"><span>{isReal ? `${references.length} 张实拍` : '本页参考'}</span><div>{references.map((reference) => { const summary = 'originalDescription' in reference.tags ? reference.tags.originalDescription : reference.tags.summary; return <span key={reference.id} title={summary}>{imageUrls[reference.id] ? <img src={imageUrls[reference.id]} alt={summary} /> : <ImageIcon size={14} />}<small>{reference.id}</small></span> })}</div></div>
+          <div className="story-actions"><button className="text-button" onClick={() => image && exportImage(task!.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button>{!isReal && <><button className="secondary compact" onClick={() => regenerateImage(task!.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button><button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button></>}</div>
+          {!isReal && editing && <div className="story-feedback"><label htmlFor={`feedback-${page.id}`}>你希望怎么改？</label><textarea id={`feedback-${page.id}`} rows={3} value={feedbacks[page.id] || ''} onChange={(event) => setFeedbacks({ ...feedbacks, [page.id]: event.target.value })} /><button className="primary compact" onClick={async () => { const ok = await regenerateImage(task!.id, page.id, feedbacks[page.id] || ''); if (ok) setEditingPage('') }} disabled={!feedbacks[page.id]?.trim() || !!busy}><WandSparkles size={14} />按要求重新生成</button></div>}
         </article>
       })}</div>
-
-      {readyCount < pages.length && !generatingSet && <div className="resume-image-set"><div><b>还有 {pages.length - readyCount} 张未完成</b><span>可以从中断位置继续，不会重复生成已完成页面。</span></div><button className="primary" onClick={() => createImageSet(draft.version)} disabled={!!busy}><ImagePlus size={16} />继续生成</button></div>}
+      {isReal && <div className="resume-image-set real-remix"><div><b>需要换一套分组或版式？</b><span>重新制作会基于当前文案和已启用实拍图片生成新方案。</span></div><button className="secondary" onClick={() => createRealPosterSet(draft.version)} disabled={!!busy}><RefreshCw size={16} />重新分组排版</button></div>}
+      {!isReal && readyCount < pages.length && !generatingSet && <div className="resume-image-set"><div><b>还有 {pages.length - readyCount} 张未完成</b><span>可以从中断位置继续，不会重复生成已完成页面。</span></div><button className="primary" onClick={() => createImageSet(draft.version)} disabled={!!busy}><ImagePlus size={16} />继续生成</button></div>}
     </>}
-    {allIllustrated && <div className="image-finish-bar"><div><CheckCircle2 size={21} /><span><b>本轮套图已完成</b><small>每篇文案都已经生成了完整的封面与内容页。</small></span></div></div>}
+    {allIllustrated && <div className="image-finish-bar"><div><CheckCircle2 size={21} /><span><b>本轮套图已完成</b><small>每篇文案都已经有可入库的配图。</small></span></div></div>}
     <div className="panel-actions"><span className="skip-note">配图可以稍后补充；终稿避重只分析文字，不分析图片。</span><button className="primary" onClick={goArchive} disabled={!!busy}>继续确认入库<ChevronRight size={17} /></button></div>
   </section>
 }
@@ -843,7 +910,8 @@ function ArchiveStep({ project, busy, archiveFinal, goImages }: { project: Proje
     {!confirmedDrafts.length ? <Gate icon={<Archive size={25} />} message="没有可入库的确认稿" target="请先回到审核步骤确认文案。" /> : <div className="archive-candidates">{confirmedDrafts.map((draft) => {
       const strategy = project.strategies.find((item) => item.id === draft.strategyId)
       const archived = project.finalContents.find((item) => item.status === 'archived' && item.generationId === project.currentGeneration.id && item.draftVersion === draft.version)
-      const task = project.imageTasks.find((item) => item.draftVersion === draft.version)
+      const taskCandidates = project.imageTasks.filter((item) => item.draftVersion === draft.version)
+      const task = taskCandidates.find(imageTaskComplete) || taskCandidates.at(-1)
       return <article key={draft.version} className={archived ? 'archived' : ''}><div><span>{project.generationConfig.mode === 'native' ? '生活化种草' : '显式宣传'} · 文案 v{draft.version}</span><h3>{draft.title}</h3><p>{strategy?.coreQuestion || strategy?.angle}</p><small>{task ? `${Object.keys(task.currentImageIds || {}).length} 张配图` : '无配图，将仅保存文字'}</small></div>{archived ? <b className="archive-done"><CheckCircle2 size={17} />已入库为 {archived.id}</b> : <button className="primary" onClick={() => archiveFinal(draft.version)} disabled={!!busy}>{busy === 'archive-final' ? <LoaderCircle className="spin" size={16} /> : <Archive size={16} />}确认入库</button>}</article>
     })}</div>}
     <div className="archive-warning"><Scale size={18} /><p>确认入库后，这篇文案的核心选题、目标人群、切入问题和业务承接方式会进入后续避重范围。图片只作为资产保存，不参与重复判断。</p></div>
@@ -927,16 +995,16 @@ function ArchivedImages({ record, busy, regenerateImage, exportImage, exportImag
     <StepHeader step={`${record.id} · 阶段 7`} title="生成一整套小红书配图" action={readyCount > 0 && <button className="secondary compact" onClick={() => exportImageSet(task.id)} disabled={!!busy}><Download size={15} />导出整套</button>}>查看和继续使用这轮生成的封面与内容页。</StepHeader>
     <div className="image-document-tabs">{tasks.map((item, index) => {
       const itemDraft = record.drafts.find((candidate) => candidate.version === item.draftVersion)
-      return <button key={item.id} className={item.id === task.id ? 'active' : ''} onClick={() => setSelectedTaskId(item.id)}><span>{documentLabel(index)}</span><b>{itemDraft?.title || item.brief.coverTitle}</b>{imageTaskComplete(item) ? <CheckCircle2 size={15} /> : <small>{Object.keys(item.currentImageIds || {}).length} 张已完成</small>}</button>
+      return <button key={item.id} className={item.id === task.id ? 'active' : ''} onClick={() => setSelectedTaskId(item.id)}><span>{documentLabel(index)}</span><b>{itemDraft?.title || item.brief?.coverTitle || '配图任务'}</b>{imageTaskComplete(item) ? <CheckCircle2 size={15} /> : <small>{Object.keys(item.currentImageIds || {}).length} 张已完成</small>}</button>
     })}</div>
-    <div className="storyboard-head"><div><span>套图思路</span><h3>{task.plan?.concept || task.brief.subject}</h3><p>{task.plan?.visualContinuity || task.brief.visualContinuity}</p></div><div className="storyboard-progress"><b>{readyCount}/{pages.length}</b><span>张已完成</span></div></div>
+    <div className="storyboard-head"><div><span>{task.mode === 'real_photo_poster' ? '实拍分组思路' : '套图思路'}</span><h3>{task.plan?.concept || task.brief?.subject || '历史配图'}</h3><p>{task.plan?.visualContinuity || task.brief?.visualContinuity || ''}</p></div><div className="storyboard-progress"><b>{readyCount}/{pages.length}</b><span>张已完成</span></div></div>
     <div className="storyboard-grid">{pages.map((page, index) => {
       const imageId = task.currentImageIds?.[page.id]
       const image = task.images.find((item) => item.id === imageId)
       const revisions = task.images.filter((item) => item.pageId === page.id).length
       const regenerating = busy === `image-regenerate:${page.id}`
       const editing = editingPage === page.id
-      return <article key={page.id} className={`story-page ${page.role === 'cover' ? 'cover' : ''} ${image && sources[image.id] ? 'is-revealed' : ''}`}><div className="story-image">{image && sources[image.id] ? <img src={sources[image.id]} alt={`${page.label}：${page.title}`} /> : <div className="story-image-empty"><ImageIcon size={25} /><span>尚未生成</span></div>}<span className="story-index">{String(index + 1).padStart(2, '0')}</span><span className="story-role">{page.label}</span>{regenerating && <div className="story-image-busy"><LoaderCircle className="spin" size={25} /><b>{progress?.pageId === page.id ? progress.label : `正在更新${page.label}`}</b><span>会先重写提示词，再生成图片</span></div>}</div><div className="story-copy"><div><h3>{page.title}</h3><p>{page.purpose}</p></div><span>版本 {Math.max(1, revisions)}</span></div><div className="story-actions"><button className="text-button" onClick={() => image && exportImage(task.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button><button className="secondary compact" onClick={() => regenerateImage(task.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button><button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button></div>{editing && <div className="story-feedback"><label htmlFor={`history-feedback-${page.id}`}>你希望怎么改？</label><textarea id={`history-feedback-${page.id}`} rows={3} value={feedbacks[page.id] || ''} onChange={(event) => setFeedbacks({ ...feedbacks, [page.id]: event.target.value })} placeholder="例如：标题再醒目一点，改成真实行李与手册的俯拍画面" /><button className="primary compact" onClick={async () => { const ok = await regenerateImage(task.id, page.id, feedbacks[page.id] || ''); if (ok) { setEditingPage(''); setFeedbacks({ ...feedbacks, [page.id]: '' }) } }} disabled={!feedbacks[page.id]?.trim() || !!busy}><WandSparkles size={14} />按要求重新生成</button></div>}</article>
+      return <article key={page.id} className={`story-page ${page.role === 'cover' ? 'cover' : ''} ${image && sources[image.id] ? 'is-revealed' : ''}`}><div className="story-image">{image && sources[image.id] ? <img src={sources[image.id]} alt={`${page.label}：${page.title}`} /> : <div className="story-image-empty"><ImageIcon size={25} /><span>尚未生成</span></div>}<span className="story-index">{String(index + 1).padStart(2, '0')}</span><span className="story-role">{page.label}</span>{regenerating && task.mode !== 'real_photo_poster' && <div className="story-image-busy"><LoaderCircle className="spin" size={25} /><b>{progress?.pageId === page.id ? progress.label : `正在更新${page.label}`}</b><span>会先重写提示词，再生成图片</span></div>}</div><div className="story-copy"><div><h3>{page.title}</h3><p>{page.purpose}</p></div><span>版本 {Math.max(1, revisions)}</span></div><div className="story-actions"><button className="text-button" onClick={() => image && exportImage(task.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button>{task.mode !== 'real_photo_poster' && <><button className="secondary compact" onClick={() => regenerateImage(task.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button><button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button></>}</div>{task.mode !== 'real_photo_poster' && editing && <div className="story-feedback"><label htmlFor={`history-feedback-${page.id}`}>你希望怎么改？</label><textarea id={`history-feedback-${page.id}`} rows={3} value={feedbacks[page.id] || ''} onChange={(event) => setFeedbacks({ ...feedbacks, [page.id]: event.target.value })} placeholder="例如：标题再醒目一点，改成真实行李与手册的俯拍画面" /><button className="primary compact" onClick={async () => { const ok = await regenerateImage(task.id, page.id, feedbacks[page.id] || ''); if (ok) { setEditingPage(''); setFeedbacks({ ...feedbacks, [page.id]: '' }) } }} disabled={!feedbacks[page.id]?.trim() || !!busy}><WandSparkles size={14} />按要求重新生成</button></div>}</article>
     })}</div>
     {draft && <div className="generation-set-caption"><span>{task.strategyId} · 文案 v{task.draftVersion}</span><b>{draft.title}</b></div>}
   </section>
@@ -1104,30 +1172,44 @@ function OcrStreamPreview({ content, fileCount }: { content: string; fileCount: 
   </aside>
 }
 
-function AssetsPage({ project, chooseFolder, importMaterial, materialFiles, selectMaterialFiles, addDroppedMaterialFiles, removeMaterialFile, clearMaterialFiles, extractMaterial, exportMaterial, downloadAssetTemplate, importAssetBatch, exportAsset, busy, referenceProgress, tab, setTab, openAsset, deleteAsset, toggleAsset, uploadImageReferences, importImageReferencePackage, exportImageReferencePackage, retagImageReference, setImageReferenceRole, toggleImageReference, deleteImageReference, goGenerate }: {
+function AssetsPage({ project, chooseFolder, importMaterial, materialFiles, selectMaterialFiles, addDroppedMaterialFiles, removeMaterialFile, clearMaterialFiles, extractMaterial, exportMaterial, downloadAssetTemplate, importAssetBatch, exportAsset, busy, referenceProgress, realPhotoProgress, tab, setTab, openAsset, deleteAsset, toggleAsset, uploadImageReferences, importImageReferencePackage, exportImageReferencePackage, retagImageReference, setImageReferenceRole, toggleImageReference, deleteImageReference, uploadRealPhotos, retagRealPhoto, toggleRealPhoto, deleteRealPhoto, goGenerate }: {
   project: ProjectData | null; chooseFolder: () => void; importMaterial: () => void; materialFiles: MaterialUploadFile[];
   selectMaterialFiles: () => void; addDroppedMaterialFiles: (files: File[]) => void; removeMaterialFile: (filePath: string) => void; clearMaterialFiles: () => void;
   extractMaterial: () => void; exportMaterial: () => void;
   downloadAssetTemplate: (kind: BatchAssetKind) => void; importAssetBatch: (kind: BatchAssetKind) => void; exportAsset: (kind: AssetKind) => void;
-  busy: string; referenceProgress: ImageReferenceProgressEvent | null; tab: AssetLibraryTab; setTab: (tab: AssetLibraryTab) => void;
+  busy: string; referenceProgress: ImageReferenceProgressEvent | null; realPhotoProgress: RealPhotoProgressEvent | null; tab: AssetLibraryTab; setTab: (tab: AssetLibraryTab) => void;
   openAsset: (kind: AssetKind, item?: Keyword | Rule | Reference) => void;
   deleteAsset: (kind: AssetKind, id: string) => void; toggleAsset: (kind: AssetKind, id: string, enabled: boolean) => Promise<boolean>; goGenerate: () => void;
   uploadImageReferences: (isCover: boolean) => void; retagImageReference: (id: string) => void;
   importImageReferencePackage: () => void; exportImageReferencePackage: () => void;
   setImageReferenceRole: (id: string, isCover: boolean) => void; toggleImageReference: (id: string, enabled: boolean) => void; deleteImageReference: (id: string) => void;
+  uploadRealPhotos: () => void; retagRealPhoto: (id: string) => void; toggleRealPhoto: (id: string, enabled: boolean) => void; deleteRealPhoto: (id: string) => void;
 }) {
   const [draggingMaterial, setDraggingMaterial] = useState(false)
-  const labels: Record<AssetLibraryTab, string> = { keywords: '关键词', references: '参考文案', rules: '合规准则', imageReferences: '小红书图片' }
+  const labels: Record<AssetLibraryTab, string> = { keywords: '关键词', references: '参考文案', rules: '合规准则', imageReferences: '小红书图片', realPhotos: '业务实拍' }
   const counts: Record<AssetLibraryTab, [number, number]> = {
     keywords: [project?.keywords.filter((item) => item.enabled).length || 0, project?.keywords.length || 0],
     references: [project?.references.filter((item) => item.enabled).length || 0, project?.references.length || 0],
     rules: [project?.rules.filter((item) => item.enabled).length || 0, project?.rules.length || 0],
     imageReferences: [project?.imageReferences.filter((item) => item.enabled && item.taggingStatus === 'ready').length || 0, project?.imageReferences.length || 0],
+    realPhotos: [project?.realPhotos.filter((item) => item.enabled && item.taggingStatus === 'ready').length || 0, project?.realPhotos.length || 0],
   }
-  const standardTab = tab === 'imageReferences' ? null : tab
+  const standardTab = tab === 'imageReferences' || tab === 'realPhotos' ? null : tab
   const items = project && standardTab ? project[standardTab] : []
   const materialBytes = materialFiles.reduce((total, file) => total + file.size, 0)
-  return <div className="page-content"><PageHeader title="素材管理" action={project && <button className="primary" onClick={goGenerate}><WandSparkles size={17} />前往文案生成</button>}>维护业务事实来源、文案参考和优秀图片样本；生成时只读取当前生效的素材。</PageHeader>{!project ? <ProjectEmpty recent={[]} openRecent={() => undefined} chooseFolder={chooseFolder} /> : <><section className={`material-card surface-card ${project.material.exists ? 'ready' : ''}`}><div className="material-summary"><span className="large-icon"><FileText size={25} /></span><div><span>业务原始素材</span><h2>{project.material.exists ? '业务原始素材.md' : '尚未添加业务原始素材'}</h2><p>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 更新后可重新提取业务事实` : '可直接导入 Markdown，或用 AI 从 PDF / 图片提取'}</p></div><div className="material-actions"><button className="secondary compact" onClick={exportMaterial} disabled={!project.material.exists || !!busy}>{busy === 'export-material' ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={importMaterial} disabled={!!busy}>{busy === 'material' ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}{project.material.exists ? '替换 Markdown' : '导入 Markdown'}</button></div></div><div className={`material-dropzone ${draggingMaterial ? 'dragging' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDraggingMaterial(true) }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDraggingMaterial(true) }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDraggingMaterial(false) }} onDrop={(event) => { event.preventDefault(); setDraggingMaterial(false); addDroppedMaterialFiles(Array.from(event.dataTransfer.files)) }}><span className="material-drop-icon"><Upload size={20} /></span><div><b>拖拽 PDF 或图片到这里</b><span>可以一个个添加，也可以一次多选；全部添加后再调用 AI</span></div><button className="secondary compact" onClick={selectMaterialFiles} disabled={!!busy}><Plus size={15} />选择文件</button></div>{materialFiles.length > 0 && <div className="material-queue"><div className="material-queue-head"><div><b>待提取文件</b><span>{materialFiles.length}/20 个 · {formatFileSize(materialBytes)}/50MB</span></div><button className="text-button" onClick={clearMaterialFiles} disabled={!!busy}>清空列表</button></div><ol>{materialFiles.map((file, index) => <li key={file.path}><span className="material-file-index">{index + 1}</span><FileText size={16} /><div><b>{file.name}</b><span>{formatFileSize(file.size)}</span></div><button className="text-button" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => removeMaterialFile(file.path)} disabled={!!busy}><X size={15} /></button></li>)}</ol><div className="material-queue-actions"><span>AI 将按列表顺序读取，并合并生成一份业务原始素材</span><button className="primary" onClick={extractMaterial} disabled={!!busy}>{busy === 'material-ai' ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}{busy === 'material-ai' ? '正在提取' : `开始提取（${materialFiles.length} 个）`}</button></div></div>}</section><section className="asset-library surface-card"><div className="asset-tabs">{(Object.keys(labels) as AssetLibraryTab[]).map((key) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{labels[key]}<span>{counts[key][0]}/{counts[key][1]}</span></button>)}</div>{tab === 'imageReferences' ? <ImageReferenceLibrary items={project.imageReferences} busy={busy} progress={referenceProgress} upload={uploadImageReferences} importPackage={importImageReferencePackage} exportPackage={exportImageReferencePackage} retag={retagImageReference} setRole={setImageReferenceRole} toggle={toggleImageReference} remove={deleteImageReference} /> : <><div className="asset-toolbar"><div><h2>{labels[tab]}</h2><p>支持手动维护、Excel 批量导入与完整导出。关闭“生效”后，该行不会拼接进模型提示词。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={() => exportAsset(tab)} disabled={!!busy}>{busy === `export-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={() => downloadAssetTemplate(tab)} disabled={!!busy}>{busy === `template-${tab}` ? <LoaderCircle className="spin" size={16} /> : <LayoutTemplate size={16} />}下载模板</button><button className="secondary compact" onClick={() => importAssetBatch(tab)} disabled={!!busy}>{busy === `import-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}批量导入</button><button className="primary compact" onClick={() => openAsset(tab)} disabled={!!busy}><Plus size={16} />新增{tab === 'rules' ? '准则' : labels[tab]}</button></div></div>{items.length === 0 ? <div className="compact-empty tall"><Archive size={25} /><b>还没有{labels[tab]}</b><span>可新增单条记录，也可下载模板后批量导入。</span></div> : <AssetTable kind={tab} items={items} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={toggleAsset} />}</>}</section></>}</div>
+  return <div className="page-content"><PageHeader title="素材管理" action={project && <button className="primary" onClick={goGenerate}><WandSparkles size={17} />前往文案生成</button>}>维护业务事实来源、文案参考和图片素材；生成时只读取当前生效的素材。</PageHeader>{!project ? <ProjectEmpty recent={[]} openRecent={() => undefined} chooseFolder={chooseFolder} /> : <><section className={`material-card surface-card ${project.material.exists ? 'ready' : ''}`}><div className="material-summary"><span className="large-icon"><FileText size={25} /></span><div><span>业务原始素材</span><h2>{project.material.exists ? '业务原始素材.md' : '尚未添加业务原始素材'}</h2><p>{project.material.exists ? `${project.material.content.length.toLocaleString()} 个字符 · 更新后可重新提取业务事实` : '可直接导入 Markdown，或用 AI 从 PDF / 图片提取'}</p></div><div className="material-actions"><button className="secondary compact" onClick={exportMaterial} disabled={!project.material.exists || !!busy}>{busy === 'export-material' ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={importMaterial} disabled={!!busy}>{busy === 'material' ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}{project.material.exists ? '替换 Markdown' : '导入 Markdown'}</button></div></div><div className={`material-dropzone ${draggingMaterial ? 'dragging' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDraggingMaterial(true) }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDraggingMaterial(true) }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDraggingMaterial(false) }} onDrop={(event) => { event.preventDefault(); setDraggingMaterial(false); addDroppedMaterialFiles(Array.from(event.dataTransfer.files)) }}><span className="material-drop-icon"><Upload size={20} /></span><div><b>拖拽 PDF 或图片到这里</b><span>可以一个个添加，也可以一次多选；全部添加后再调用 AI</span></div><button className="secondary compact" onClick={selectMaterialFiles} disabled={!!busy}><Plus size={15} />选择文件</button></div>{materialFiles.length > 0 && <div className="material-queue"><div className="material-queue-head"><div><b>待提取文件</b><span>{materialFiles.length}/20 个 · {formatFileSize(materialBytes)}/50MB</span></div><button className="text-button" onClick={clearMaterialFiles} disabled={!!busy}>清空列表</button></div><ol>{materialFiles.map((file, index) => <li key={file.path}><span className="material-file-index">{index + 1}</span><FileText size={16} /><div><b>{file.name}</b><span>{formatFileSize(file.size)}</span></div><button className="text-button" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => removeMaterialFile(file.path)} disabled={!!busy}><X size={15} /></button></li>)}</ol><div className="material-queue-actions"><span>AI 将按列表顺序读取，并合并生成一份业务原始素材</span><button className="primary" onClick={extractMaterial} disabled={!!busy}>{busy === 'material-ai' ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}{busy === 'material-ai' ? '正在提取' : `开始提取（${materialFiles.length} 个）`}</button></div></div>}</section><section className="asset-library surface-card"><div className="asset-tabs">{(Object.keys(labels) as AssetLibraryTab[]).map((key) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{labels[key]}<span>{counts[key][0]}/{counts[key][1]}</span></button>)}</div>{tab === 'imageReferences' ? <ImageReferenceLibrary items={project.imageReferences} busy={busy} progress={referenceProgress} upload={uploadImageReferences} importPackage={importImageReferencePackage} exportPackage={exportImageReferencePackage} retag={retagImageReference} setRole={setImageReferenceRole} toggle={toggleImageReference} remove={deleteImageReference} /> : tab === 'realPhotos' ? <RealPhotoLibrary items={project.realPhotos} busy={busy} progress={realPhotoProgress} upload={uploadRealPhotos} retag={retagRealPhoto} toggle={toggleRealPhoto} remove={deleteRealPhoto} /> : <><div className="asset-toolbar"><div><h2>{labels[tab]}</h2><p>支持手动维护、Excel 批量导入与完整导出。关闭“生效”后，该行不会拼接进模型提示词。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={() => exportAsset(tab)} disabled={!!busy}>{busy === `export-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出</button><button className="secondary compact" onClick={() => downloadAssetTemplate(tab)} disabled={!!busy}>{busy === `template-${tab}` ? <LoaderCircle className="spin" size={16} /> : <LayoutTemplate size={16} />}下载模板</button><button className="secondary compact" onClick={() => importAssetBatch(tab)} disabled={!!busy}>{busy === `import-${tab}` ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}批量导入</button><button className="primary compact" onClick={() => openAsset(tab)} disabled={!!busy}><Plus size={16} />新增{tab === 'rules' ? '准则' : labels[tab]}</button></div></div>{items.length === 0 ? <div className="compact-empty tall"><Archive size={25} /><b>还没有{labels[tab]}</b><span>可新增单条记录，也可下载模板后批量导入。</span></div> : <AssetTable kind={tab} items={items} openAsset={openAsset} deleteAsset={deleteAsset} toggleAsset={toggleAsset} />}</>}</section></>}</div>
+}
+
+function RealPhotoLibrary({ items, busy, progress, upload, retag, toggle, remove }: { items: RealPhoto[]; busy: string; progress: RealPhotoProgressEvent | null; upload: () => void; retag: (id: string) => void; toggle: (id: string, enabled: boolean) => void; remove: (id: string) => void }) {
+  const [sources, setSources] = useState<Record<string, string>>({})
+  useEffect(() => {
+    let active = true
+    Promise.all(items.map(async (item) => { const result = await window.workshop.readGeneratedImage(item.relativePath); return [item.id, result.ok ? result.imageUrl || '' : ''] as const }))
+      .then((entries) => { if (active) setSources(Object.fromEntries(entries)) })
+    return () => { active = false }
+  }, [items])
+  const importing = busy === 'upload-real-photos' && progress && progress.phase !== 'done'
+  return <><div className="asset-toolbar real-photo-toolbar"><div><h2>业务实拍图片库</h2><p>系统会结合业务原始素材生成图片描述和分类标签，用于后续主题分组与拼图。</p></div><div className="asset-toolbar-actions"><button className="primary compact" onClick={upload} disabled={!!busy}>{busy === 'upload-real-photos' ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}上传业务实拍</button></div></div>{importing && <div className="reference-import-progress real-photo-import-progress" aria-live="polite"><span className="reference-import-pulse"><Sparkles size={17} /></span><div><b>{progress.label}</b><small>图片已进入实拍库，分析结果会逐张补全</small></div><strong>{progress.current}/{progress.total}</strong><div className="generation-meter"><i style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} /></div></div>}{items.length === 0 ? <div className="image-reference-empty"><div className="reference-empty-frame real"><ImageIcon size={32} /></div><div><h3>把真实现场变成宣传图素材</h3><p>一次可上传多张照片。分析完成后，系统会按文案主题选择 1–4 张进行拼接。</p></div></div> : <div className="real-photo-grid">{items.map((item) => <article key={item.id} className={`real-photo-card ${item.enabled ? '' : 'disabled'} ${item.taggingStatus}`}><div className="real-photo-preview">{sources[item.id] ? <img src={sources[item.id]} alt={item.tags.originalDescription || item.originalName} /> : <LoaderCircle className="spin" size={20} />}<code>{item.id}</code><span>{item.width} × {item.height}</span></div><div className="real-photo-copy"><div className="reference-card-head"><div><h3>{item.tags.originalDescription || item.originalName}</h3><span>{item.tags.businessRelation || '等待判断与业务素材的关系'}</span></div><label className="switch"><input type="checkbox" checked={item.enabled} onChange={(event) => toggle(item.id, event.target.checked)} disabled={!!busy} /><span /></label></div>{item.taggingStatus === 'ready' ? <><div className="real-tag-row">{[...item.tags.themeTags, ...item.tags.sceneTags].slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}</div><p>{[...item.tags.subjectTags, ...item.tags.actionTags].slice(0, 6).join(' · ')}</p><small>{item.tags.visualTags.shotScale || '未判断景别'} · {item.tags.visualTags.quality === 'high' ? '画质较好' : item.tags.visualTags.quality === 'low' ? '画质偏低' : '画质一般'} · 留字区 {item.tags.visualTags.textSafeArea}</small></> : item.taggingStatus === 'failed' ? <div className="reference-tag-error"><b>图片分析失败</b><span>{item.taggingError}</span></div> : <div className="reference-tagging"><LoaderCircle className="spin" size={15} /><span>正在结合业务素材分析</span></div>}<div className="reference-card-actions"><button className="text-button" onClick={() => retag(item.id)} disabled={!!busy}><Sparkles size={14} />重新分析</button><button className="icon-button danger" onClick={() => remove(item.id)} disabled={!!busy}><Trash2 size={14} /></button></div></div></article>)}</div>}</>
 }
 
 function ImageReferenceLibrary({ items, busy, progress, upload, importPackage, exportPackage, retag, setRole, toggle, remove }: { items: ImageReference[]; busy: string; progress: ImageReferenceProgressEvent | null; upload: (isCover: boolean) => void; importPackage: () => void; exportPackage: () => void; retag: (id: string) => void; setRole: (id: string, isCover: boolean) => void; toggle: (id: string, enabled: boolean) => void; remove: (id: string) => void }) {

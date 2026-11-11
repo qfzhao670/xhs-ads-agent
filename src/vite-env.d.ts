@@ -26,6 +26,10 @@ interface Window {
     setImageReferenceRole(id: string, isCover: boolean): Promise<ApiResult>
     toggleImageReference(id: string, enabled: boolean): Promise<ApiResult>
     deleteImageReference(id: string): Promise<ApiResult>
+    uploadRealPhotos(): Promise<ApiResult>
+    retagRealPhoto(id: string): Promise<ApiResult>
+    toggleRealPhoto(id: string, enabled: boolean): Promise<ApiResult>
+    deleteRealPhoto(id: string): Promise<ApiResult>
     getSettings(): Promise<ModelSettings>
     readClipboardText(): Promise<string>
     saveSettings(settings: ModelSettings): Promise<ApiResult>
@@ -42,19 +46,22 @@ interface Window {
     archiveFinal(version: number, force?: boolean): Promise<ApiResult>
     removeFinalContent(id: string): Promise<ApiResult>
     createImageSet(version: number): Promise<ApiResult>
+    createRealPosterPlan(version: number): Promise<ApiResult>
+    saveRealPosterPage(taskId: string, pageId: string, dataUrl: string): Promise<ApiResult>
     regenerateImagePage(taskId: string, pageId: string, feedback: string): Promise<ApiResult>
     readGeneratedImage(relativePath: string): Promise<ApiResult>
     exportGeneratedImage(taskId: string, imageId: string): Promise<ApiResult>
     exportImageSet(taskId: string): Promise<ApiResult>
     onImageProgress(callback: (payload: ImageProgressEvent) => void): () => void
     onImageReferenceProgress(callback: (payload: ImageReferenceProgressEvent) => void): () => void
+    onRealPhotoProgress(callback: (payload: RealPhotoProgressEvent) => void): () => void
     onModelStream(callback: (payload: ModelStreamEvent) => void): () => void
   }
 }
 
 type AssetKind = 'keywords' | 'references' | 'rules'
 type BatchAssetKind = AssetKind
-type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; exported?: number; skipped?: number; failed?: number; savedPath?: string; imageUrl?: string; duplicateId?: string; archivedId?: string }
+type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; exported?: number; skipped?: number; failed?: number; savedPath?: string; imageUrl?: string; duplicateId?: string; archivedId?: string; taskId?: string }
 type MaterialUploadFile = { name: string; path: string; size: number }
 type MaterialFileSelectionResult = { ok: boolean; error?: string; files?: MaterialUploadFile[] }
 type ImageModelSettings = {
@@ -70,6 +77,10 @@ type ImageProgressEvent = {
 type ImageReferenceProgressEvent = {
   phase: 'added' | 'tagging' | 'item-done' | 'done'; current: number; total: number; label: string;
   references?: ImageReference[]; reference?: ImageReference
+}
+type RealPhotoProgressEvent = {
+  phase: 'added' | 'analyzing' | 'item-done' | 'done'; current: number; total: number; label: string;
+  photos?: RealPhoto[]; photo?: RealPhoto
 }
 
 type Keyword = {
@@ -92,6 +103,18 @@ type ImageReference = {
   id: string; originalName: string; relativePath: string; width: number; height: number; isCover: boolean;
   enabled: boolean; taggingStatus: 'pending' | 'ready' | 'failed'; taggingError: string; tags: ImageReferenceTags;
   createdAt: string; updatedAt: string
+}
+type RealPhotoVisualTags = {
+  orientation: 'landscape' | 'portrait' | 'square'; shotScale: string; subjectPosition: string;
+  dominantColors: string[]; quality: 'high' | 'medium' | 'low'; textSafeArea: 'top' | 'bottom' | 'left' | 'right' | 'none'
+}
+type RealPhotoTags = {
+  originalDescription: string; businessRelation: string; themeTags: string[]; sceneTags: string[];
+  subjectTags: string[]; actionTags: string[]; visualTags: RealPhotoVisualTags
+}
+type RealPhoto = {
+  id: string; originalName: string; relativePath: string; width: number; height: number; hash: string; enabled: boolean;
+  taggingStatus: 'pending' | 'ready' | 'failed'; taggingError: string; tags: RealPhotoTags; createdAt: string; updatedAt: string
 }
 type Conflict = { topic: string; versions: string[]; question: string }
 type Facts = { confirmedFacts: { category: string; items: string[] }[]; promotionalExpressions: string[]; conflicts: Conflict[]; generatedAt: string }
@@ -123,12 +146,17 @@ type ImageBrief = {
 }
 type GeneratedImage = {
   id: string; relativePath: string; createdAt: string; model: string; size: string; seed: number;
-  requestId: string; prompt: string; negativePrompt: string; pageId: string; revision: number; feedback: string; referenceImageIds: string[]
+  requestId: string; prompt: string; negativePrompt: string; pageId: string; revision: number; feedback: string; referenceImageIds: string[];
+  sourcePhotoIds?: string[]; renderType?: 'real_photo_poster'
 }
-type ImagePlanPage = { id: string; role: 'cover' | 'content' | 'summary'; label: string; purpose: string; title: string; referenceImageIds: string[]; brief: ImageBrief }
+type ImagePlanPage = {
+  id: string; role: 'cover' | 'content' | 'summary'; label: string; purpose: string; title: string; referenceImageIds: string[]; brief: ImageBrief;
+  promotionTheme?: string; subtitle?: string; sourcePhotoIds?: string[]; groupReason?: string; evidenceQuotes?: string[];
+  layoutTemplateId?: string; textPosition?: 'top' | 'bottom'; accentColor?: string
+}
 type ImagePlan = { version: number; concept: string; visualContinuity: string; pages: ImagePlanPage[] }
 type ImageTask = {
-  id: string; generationId: string; strategyId: string; draftVersion: number; brief: ImageBrief;
+  id: string; mode?: 'ai_generated' | 'real_photo_poster'; generationId: string; strategyId: string; draftVersion: number; brief: ImageBrief | null;
   prompt: string; negativePrompt: string; artifactDir: string; images: GeneratedImage[];
   selectedImageId: string; currentImageIds: Record<string, string>; plan: ImagePlan; createdAt: string; updatedAt: string
 }
@@ -141,7 +169,7 @@ type GenerationRecord = {
 type ProjectData = {
   meta: { name: string; root: string; createdAt: string; updatedAt: string }
   material: { exists: boolean; name: string; content: string }
-  keywords: Keyword[]; references: Reference[]; rules: Rule[]; imageReferences: ImageReference[]; finalContents: FinalContent[]
+  keywords: Keyword[]; references: Reference[]; rules: Rule[]; imageReferences: ImageReference[]; realPhotos: RealPhoto[]; finalContents: FinalContent[]
   generationConfig: GenerationConfig
   facts: Facts | null; strategies: Strategy[]; selectedStrategyIds: string[]; selectedStrategyId: string; strategyAdvice: Record<string, string>; advice: string
   drafts: Draft[]; currentDraft: Draft | null; imageTasks: ImageTask[]
