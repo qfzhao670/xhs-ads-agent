@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('workshop', {
   toggleImageReference: (id, enabled) => ipcRenderer.invoke('image-reference:toggle', id, enabled),
   deleteImageReference: (id) => ipcRenderer.invoke('image-reference:delete', id),
   uploadRealPhotos: () => ipcRenderer.invoke('real-photo:upload'),
+  importRealPhotoPackage: () => ipcRenderer.invoke('real-photo:import-package'),
+  exportRealPhotoPackage: () => ipcRenderer.invoke('real-photo:export-package'),
   retagRealPhoto: (id) => ipcRenderer.invoke('real-photo:retag', id),
   toggleRealPhoto: (id, enabled) => ipcRenderer.invoke('real-photo:toggle', id, enabled),
   deleteRealPhoto: (id) => ipcRenderer.invoke('real-photo:delete', id),

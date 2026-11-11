@@ -27,6 +27,8 @@ interface Window {
     toggleImageReference(id: string, enabled: boolean): Promise<ApiResult>
     deleteImageReference(id: string): Promise<ApiResult>
     uploadRealPhotos(): Promise<ApiResult>
+    importRealPhotoPackage(): Promise<ApiResult>
+    exportRealPhotoPackage(): Promise<ApiResult>
     retagRealPhoto(id: string): Promise<ApiResult>
     toggleRealPhoto(id: string, enabled: boolean): Promise<ApiResult>
     deleteRealPhoto(id: string): Promise<ApiResult>

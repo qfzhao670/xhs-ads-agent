@@ -36,6 +36,10 @@ const {
   sanitizeRealPhotoTags,
   sanitizeRealPosterPlan,
 } = require('./real-photo-utils.cjs')
+const {
+  createRealPhotoPackage,
+  readRealPhotoPackage,
+} = require('./real-photo-package.cjs')
 
 const MARKER = '小红书运营工坊.json'
 const DATA_DIR = '项目数据'
@@ -1285,6 +1289,115 @@ ipcMain.handle('image-reference:import-package', async () => {
     if (importedItems.length) {
       await writeMeta(meta)
       await saveImageReferences(items)
+    }
+    committed = true
+    return { ok: true, imported: importedItems.length, skipped, data: await loadProject() }
+  } catch (error) {
+    if (!committed) for (const file of createdFiles) {
+      try { if (await exists(file)) await fsp.unlink(file) } catch { /* Best-effort rollback for newly created package files. */ }
+    }
+    return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined }
+  }
+})
+
+ipcMain.handle('real-photo:export-package', async () => {
+  try {
+    if (!currentRoot) throw new Error('请先创建或打开项目')
+    const items = (await readJson(dataPath(REAL_PHOTOS_FILE), [])).map(normalizeRealPhoto)
+    if (!items.length) throw new Error('业务实拍图库为空，无法导出')
+    const meta = await readMeta()
+    const safeProjectName = String(meta?.name || cleanName(currentRoot)).replace(/[\\/:*?"<>|]/g, '-').slice(0, 40)
+    const result = await dialog.showSaveDialog({
+      title: '导出业务实拍素材包',
+      defaultPath: `${safeProjectName}-业务实拍素材包-${now().slice(0, 10)}.zip`,
+      filters: [{ name: '业务实拍素材包', extensions: ['zip'] }],
+    })
+    if (result.canceled || !result.filePath) return { ok: true }
+
+    const entries = []
+    for (const photo of items) {
+      const source = resolveProjectFile(photo.relativePath)
+      if (!await exists(source)) throw new Error(`图片文件不存在，无法导出：${photo.originalName || photo.id}`)
+      entries.push({ photo, buffer: await fsp.readFile(source), extension: path.extname(source) })
+    }
+    const packageBuffer = createRealPhotoPackage(entries)
+    await fsp.writeFile(result.filePath, packageBuffer)
+    return { ok: true, exported: entries.length, savedPath: result.filePath }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('real-photo:import-package', async () => {
+  const createdFiles = []
+  let committed = false
+  try {
+    if (!currentRoot) throw new Error('请先创建或打开项目')
+    const result = await dialog.showOpenDialog({
+      title: '导入业务实拍素材包',
+      buttonLabel: '导入并复用标签',
+      properties: ['openFile'],
+      filters: [{ name: '业务实拍素材包', extensions: ['zip'] }],
+    })
+    if (result.canceled || !result.filePaths[0]) return { ok: false, error: '' }
+    const source = result.filePaths[0]
+    const stat = await fsp.stat(source)
+    if (stat.size > 300 * 1024 * 1024) throw new Error('实拍素材包超过 300MB，无法导入')
+    const { entries } = readRealPhotoPackage(await fsp.readFile(source))
+
+    const items = (await readJson(dataPath(REAL_PHOTOS_FILE), [])).map(normalizeRealPhoto)
+    const existingHashes = new Set(items.map((item) => item.hash).filter(Boolean))
+    for (const item of items.filter((value) => !value.hash)) {
+      try {
+        const file = resolveProjectFile(item.relativePath)
+        if (await exists(file)) existingHashes.add(imageHash(await fsp.readFile(file)))
+      } catch { /* A broken existing item should not prevent importing the rest of the package. */ }
+    }
+
+    const meta = await readMeta()
+    meta.counters = meta.counters || {}
+    const highestExistingId = items.reduce((highest, item) => {
+      const match = /^REALIMG-(\d+)$/.exec(item.id)
+      return Math.max(highest, match ? Number(match[1]) : 0)
+    }, 0)
+    meta.counters.realPhotos = Math.max(Number(meta.counters.realPhotos) || 0, highestExistingId)
+    let skipped = 0
+    const importedItems = []
+    for (const entry of entries) {
+      if (existingHashes.has(entry.sha256)) { skipped += 1; continue }
+      const dimensions = nativeImage.createFromBuffer(entry.buffer).getSize()
+      if (!dimensions.width || !dimensions.height) throw new Error(`${entry.photo.originalName || entry.photo.file} 不是可读取的图片`)
+      if (dimensions.width > 8000 || dimensions.height > 8000 || Math.max(dimensions.width, dimensions.height) / Math.min(dimensions.width, dimensions.height) > 10) {
+        throw new Error(`${entry.photo.originalName || entry.photo.file} 的尺寸不符合要求（边长不超过 8000，长宽比不超过 10:1）`)
+      }
+
+      meta.counters.realPhotos = (meta.counters.realPhotos || 0) + 1
+      const id = `REALIMG-${String(meta.counters.realPhotos).padStart(4, '0')}`
+      const target = dataPath(path.join(REAL_PHOTOS_DIR, `${id}${entry.extension}`))
+      await fsp.mkdir(path.dirname(target), { recursive: true })
+      await fsp.writeFile(target, entry.buffer, { flag: 'wx' })
+      createdFiles.push(target)
+      const sourceStatus = entry.photo.taggingStatus
+      const imported = normalizeRealPhoto({
+        id,
+        originalName: path.basename(String(entry.photo.originalName || `${id}${entry.extension}`)),
+        relativePath: projectRelative(target),
+        hash: entry.sha256,
+        width: dimensions.width,
+        height: dimensions.height,
+        enabled: entry.photo.enabled !== false,
+        taggingStatus: sourceStatus === 'ready' ? 'ready' : 'failed',
+        taggingError: sourceStatus === 'ready' ? '' : String(entry.photo.taggingError || '源素材尚未完成分析，请重新分析'),
+        tags: sanitizeRealPhotoTags(entry.photo.tags),
+        createdAt: now(),
+        updatedAt: now(),
+      })
+      items.push(imported)
+      importedItems.push(imported)
+      existingHashes.add(entry.sha256)
+    }
+
+    if (importedItems.length) {
+      await writeMeta(meta)
+      await saveRealPhotos(items)
     }
     committed = true
     return { ok: true, imported: importedItems.length, skipped, data: await loadProject() }
