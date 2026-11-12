@@ -2098,9 +2098,36 @@ ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl, 
     const tasks = [...project.imageTasks]
     const task = normalizeImageTask(tasks[taskIndex])
     if (task.mode !== 'real_photo_poster') throw new Error('当前任务不是实拍宣传图')
-    const pageIndex = task.plan.pages.findIndex((item) => item.id === String(pageId))
-    if (pageIndex < 0) throw new Error('没有找到要保存的宣传图页面')
-    let page = task.plan.pages[pageIndex]
+    let pageIndex = task.plan.pages.findIndex((item) => item.id === String(pageId))
+    const creatingPage = pageIndex < 0 && pageUpdate?.createNew === true
+    if (pageIndex < 0 && !creatingPage) throw new Error('没有找到要保存的宣传图页面')
+    if (creatingPage && task.plan.pages.length >= 12) throw new Error('单个实拍宣传图任务最多包含 12 个页面')
+    let page
+    if (creatingPage) {
+      const usedNumbers = task.plan.pages.map((item) => /^REAL-PAGE-(\d+)$/.exec(String(item.id))?.[1]).filter(Boolean).map(Number)
+      const nextNumber = Math.max(0, ...usedNumbers) + 1
+      page = {
+        id: `REAL-PAGE-${String(nextNumber).padStart(2, '0')}`,
+        role: 'content',
+        label: `内容页 ${task.plan.pages.length}`,
+        purpose: '用户手动新建的实拍宣传图',
+        promotionTheme: String(pageUpdate.title || '').trim(),
+        title: String(pageUpdate.title || '').trim(),
+        subtitle: '',
+        sourcePhotoIds: [],
+        photoMatches: [],
+        groupReason: '用户手动选择图片并完成排版',
+        evidenceQuotes: [],
+        relevanceLevel: 'contextual',
+        relevanceReason: '用户手动创建',
+        needsReview: true,
+        layoutTemplateId: 'single',
+        textPosition: 'bottom',
+        accentColor: '#ffd43b',
+        referenceImageIds: [],
+      }
+      pageIndex = task.plan.pages.length
+    } else page = task.plan.pages[pageIndex]
     if (pageUpdate && typeof pageUpdate === 'object') {
       const sourcePhotoIds = Array.isArray(pageUpdate.sourcePhotoIds) ? pageUpdate.sourcePhotoIds.map(String).filter(Boolean).slice(0, 4) : []
       if (!sourcePhotoIds.length) throw new Error('宣传图至少需要一张实拍图片')
@@ -2129,7 +2156,12 @@ ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl, 
       })
       const needsReview = photoMatches.some((item) => ['contextual', 'fallback'].includes(item.relevanceLevel))
       page = { ...page, title, subtitle, sourcePhotoIds, photoMatches, needsReview, layoutTemplateId, textPosition, accentColor }
-      task.plan = { ...task.plan, pages: task.plan.pages.map((item, index) => index === pageIndex ? page : item) }
+      task.plan = {
+        ...task.plan,
+        pages: creatingPage
+          ? [...task.plan.pages, page]
+          : task.plan.pages.map((item, index) => index === pageIndex ? page : item),
+      }
     }
     const match = String(dataUrl || '').match(/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/)
     if (!match) throw new Error('宣传图渲染结果格式不正确')
@@ -2152,7 +2184,7 @@ ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl, 
     tasks[taskIndex] = task
     await saveImageTasks(tasks)
     await saveImageTaskArtifacts(task)
-    return { ok: true, data: await loadProject() }
+    return { ok: true, data: await loadProject(), pageId: page.id }
   } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
 })
 

@@ -63,7 +63,7 @@ interface Window {
 
 type AssetKind = 'keywords' | 'references' | 'rules'
 type BatchAssetKind = AssetKind
-type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; exported?: number; skipped?: number; failed?: number; savedPath?: string; imageUrl?: string; duplicateId?: string; archivedId?: string; taskId?: string }
+type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; exported?: number; skipped?: number; failed?: number; savedPath?: string; imageUrl?: string; duplicateId?: string; archivedId?: string; taskId?: string; pageId?: string }
 type MaterialUploadFile = { name: string; path: string; size: number }
 type MaterialFileSelectionResult = { ok: boolean; error?: string; files?: MaterialUploadFile[] }
 type ImageModelSettings = {
@@ -159,7 +159,7 @@ type ImagePlanPage = {
 }
 type RealPhotoMatchLevel = 'direct' | 'supporting' | 'contextual' | 'fallback' | 'conflicting'
 type RealPhotoMatch = { photoId: string; relevanceLevel: RealPhotoMatchLevel; evidenceQuotes: string[]; reason: string }
-type RealPosterPageUpdate = Pick<ImagePlanPage, 'id' | 'title' | 'subtitle' | 'sourcePhotoIds' | 'layoutTemplateId' | 'textPosition' | 'accentColor'>
+type RealPosterPageUpdate = Pick<ImagePlanPage, 'id' | 'title' | 'subtitle' | 'sourcePhotoIds' | 'layoutTemplateId' | 'textPosition' | 'accentColor'> & { createNew?: boolean }
 type ImagePlan = { version: number; concept: string; visualContinuity: string; pages: ImagePlanPage[] }
 type ImageTask = {
   id: string; mode?: 'ai_generated' | 'real_photo_poster'; generationId: string; strategyId: string; draftVersion: number; brief: ImageBrief | null;

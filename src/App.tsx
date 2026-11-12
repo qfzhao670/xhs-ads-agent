@@ -511,7 +511,21 @@ function App() {
     setBusy(`real-poster-edit:${pageUpdate.id}`); setError('')
     try {
       const task = project.imageTasks.find((item) => item.id === taskId)
-      const page = task?.plan.pages.find((item) => item.id === pageUpdate.id)
+      const existingPage = task?.plan.pages.find((item) => item.id === pageUpdate.id)
+      const page = existingPage || (pageUpdate.createNew ? ({
+        id: pageUpdate.id,
+        role: 'content',
+        label: '新建内容页',
+        purpose: '用户手动新建的实拍宣传图',
+        title: pageUpdate.title || '',
+        subtitle: pageUpdate.subtitle || '',
+        sourcePhotoIds: pageUpdate.sourcePhotoIds || [],
+        layoutTemplateId: pageUpdate.layoutTemplateId,
+        textPosition: pageUpdate.textPosition,
+        accentColor: pageUpdate.accentColor,
+        referenceImageIds: [],
+        brief: blankRealPosterBrief('新建内容页'),
+      }) : null)
       if (!task || !page) throw new Error('没有找到要编辑的实拍宣传图')
       const photoIds = pageUpdate.sourcePhotoIds || []
       const entries = await Promise.all(photoIds.map(async (id) => {
@@ -525,7 +539,7 @@ function App() {
       const saved = await window.workshop.saveRealPosterPage(task.id, page.id, dataUrl, pageUpdate)
       if (!saved.ok || !saved.data) throw new Error(saved.error || `保存${page.label}失败`)
       setProject(saved.data)
-      flash(`${page.label}已保存为新版本`)
+      flash(pageUpdate.createNew ? '手动宣传图已新建并保存' : `${page.label}已保存为新版本`)
       return true
     } catch (e) { showError(e instanceof Error ? e.message : '实拍宣传图保存失败'); return false }
     finally { setBusy('') }
@@ -725,6 +739,14 @@ function RealPhotoMatchList({ page, references, imageUrls }: { page: ImagePlanPa
   })}</div></div>
 }
 
+function blankRealPosterBrief(pageLabel: string): ImageBrief {
+  return {
+    purpose: '用户手动新建的实拍宣传图', coverTitle: '', subtitle: '', style: 'event', visualMode: 'photoreal',
+    subject: '', scene: '', composition: '', palette: [], mood: '', mustShow: [], mustAvoid: [], extraNotes: '',
+    pageRole: 'content', pageLabel, visualContinuity: '',
+  }
+}
+
 function archivedCompleted(record: GenerationRecord) {
   const selectedIds = record.selectedStrategyIds || (record.selectedStrategyId ? [record.selectedStrategyId] : [])
   const hasDraft = record.drafts.length > 0
@@ -896,6 +918,7 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
   const [feedbacks, setFeedbacks] = useState<Record<string, string>>({})
   const [editingPage, setEditingPage] = useState('')
   const [posterEditorPageId, setPosterEditorPageId] = useState('')
+  const [manualPosterPage, setManualPosterPage] = useState<ImagePlanPage | null>(null)
   const planningStreamRef = useRef<HTMLPreElement>(null)
   const draft = confirmedDrafts.find((item) => item.version === selectedVersion) || confirmedDrafts[0]
   const task = project.imageTasks.find((item) => item.draftVersion === draft?.version && item.strategyId === draft?.strategyId && (item.mode || 'ai_generated') === imageMode)
@@ -906,6 +929,7 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
   const planningContent = stream.operation === `${isReal ? 'real-poster-plan' : 'image-plan'}:${draft?.version || 0}` ? stream.content : ''
 
   useEffect(() => { if (!draft && confirmedDrafts[0]) setSelectedVersion(confirmedDrafts[0].version) }, [draft, confirmedDrafts])
+  useEffect(() => { setPosterEditorPageId(''); setManualPosterPage(null) }, [task?.id, selectedVersion, imageMode])
   useEffect(() => { if (planningStreamRef.current) planningStreamRef.current.scrollTop = planningStreamRef.current.scrollHeight }, [planningContent])
   useEffect(() => {
     let active = true
@@ -931,6 +955,34 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
   const ready = isReal ? usableRealPhotos.length > 0 : usableReferences.length > 0
   const hasPlan = Boolean(task && pages.length >= (isReal ? 1 : 4))
   const allIllustrated = confirmedDrafts.every((item) => project.imageTasks.some((candidate) => candidate.draftVersion === item.version && imageTaskComplete(candidate)))
+  const posterEditorPage = manualPosterPage?.id === posterEditorPageId
+    ? manualPosterPage
+    : task?.plan.pages.find((page) => page.id === posterEditorPageId) || null
+  const startManualPosterPage = () => {
+    if (!task) return
+    const page: ImagePlanPage = {
+      id: `REAL-PAGE-NEW-${Date.now()}`,
+      role: 'content',
+      label: '新建内容页',
+      purpose: '手动选择实拍图片并编辑排版',
+      title: draft.title.slice(0, 40),
+      subtitle: '',
+      sourcePhotoIds: [],
+      photoMatches: [],
+      groupReason: '用户手动新建',
+      evidenceQuotes: [],
+      relevanceLevel: 'contextual',
+      relevanceReason: '等待用户手动选图',
+      needsReview: true,
+      layoutTemplateId: 'single',
+      textPosition: 'bottom',
+      accentColor: '#ffd43b',
+      referenceImageIds: [],
+      brief: blankRealPosterBrief('新建内容页'),
+    }
+    setManualPosterPage(page)
+    setPosterEditorPageId(page.id)
+  }
 
   return <section className="flow-panel image-workspace surface-card">
     <StepHeader step="步骤 7 / 8" title="制作小红书配图" action={task && readyCount > 0 && <button className="secondary compact" onClick={() => exportImageSet(task.id)} disabled={!!busy}><Download size={15} />导出整套</button>}>
@@ -976,21 +1028,21 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
           <div className="story-actions"><button className="text-button" onClick={() => image && exportImage(task!.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button>{isReal ? <button className="secondary compact" onClick={() => setPosterEditorPageId(page.id)} disabled={!!busy}><PenLine size={14} />{image ? '编辑图片' : '手动选图'}</button> : <><button className="secondary compact" onClick={() => regenerateImage(task!.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button><button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button></>}</div>
           {!isReal && editing && <div className="story-feedback"><label htmlFor={`feedback-${page.id}`}>你希望怎么改？</label><textarea id={`feedback-${page.id}`} rows={3} value={feedbacks[page.id] || ''} onChange={(event) => setFeedbacks({ ...feedbacks, [page.id]: event.target.value })} /><button className="primary compact" onClick={async () => { const ok = await regenerateImage(task!.id, page.id, feedbacks[page.id] || ''); if (ok) setEditingPage('') }} disabled={!feedbacks[page.id]?.trim() || !!busy}><WandSparkles size={14} />按要求重新生成</button></div>}
         </article>
-      })}</div>
+      })}{isReal && <button className="story-create-card" onClick={startManualPosterPage} disabled={!!busy || pages.length >= 12} aria-label="手动新建图片"><span><Plus size={24} /></span><b>{pages.length >= 12 ? '已达到 12 张上限' : '手动新建图片'}</b><small>选择实拍素材并编辑排版</small></button>}</div>
       {isReal && <div className="resume-image-set real-remix"><div><b>需要换一套分组或版式？</b><span>重新制作会基于当前文案和已启用实拍图片生成新方案。</span></div><button className="secondary" onClick={() => createRealPosterSet(draft.version)} disabled={!!busy}><RefreshCw size={16} />重新分组排版</button></div>}
       {!isReal && readyCount < pages.length && !generatingSet && <div className="resume-image-set"><div><b>还有 {pages.length - readyCount} 张未完成</b><span>可以从中断位置继续，不会重复生成已完成页面。</span></div><button className="primary" onClick={() => createImageSet(draft.version)} disabled={!!busy}><ImagePlus size={16} />继续生成</button></div>}
     </>}
     {allIllustrated && <div className="image-finish-bar"><div><CheckCircle2 size={21} /><span><b>本轮套图已完成</b><small>每篇文案都已经有可入库的配图。</small></span></div></div>}
     <div className="panel-actions"><span className="skip-note">配图可以稍后补充；终稿避重只分析文字，不分析图片。</span><button className="primary" onClick={goArchive} disabled={!!busy}>继续确认入库<ChevronRight size={17} /></button></div>
-    {isReal && task && posterEditorPageId && task.plan.pages.find((page) => page.id === posterEditorPageId) && <RealPosterEditor
+    {isReal && task && posterEditorPage && <RealPosterEditor
       key={`${task.id}:${posterEditorPageId}`}
       task={task}
-      page={task.plan.pages.find((page) => page.id === posterEditorPageId)!}
+      page={posterEditorPage}
       photos={project.realPhotos}
       initialSources={imageUrls}
       busy={busy === `real-poster-edit:${posterEditorPageId}`}
-      close={() => setPosterEditorPageId('')}
-      save={(pageUpdate) => saveRealPosterEdit(task.id, pageUpdate)}
+      close={() => { setPosterEditorPageId(''); setManualPosterPage(null) }}
+      save={(pageUpdate) => saveRealPosterEdit(task.id, { ...pageUpdate, createNew: Boolean(manualPosterPage) })}
     />}
   </section>
 }
