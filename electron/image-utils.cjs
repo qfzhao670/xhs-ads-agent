@@ -176,6 +176,52 @@ function buildNegativePrompt(rawBrief) {
   ])].join('，')
 }
 
+function buildRealPosterDecorationPrompt(page = {}, references = [], retryReason = '') {
+  const title = text(page.title || page.promotionTheme).slice(0, 40)
+  const subtitle = text(page.subtitle).slice(0, 60)
+  const exactText = [
+    `主标题：“${title}”`,
+    subtitle ? `副标题：“${subtitle}”` : '',
+  ].filter(Boolean).join('\n')
+  const styleNotes = references.length
+    ? references.map((reference, index) => {
+      const tags = reference?.tags || {}
+      return `图${index + 2}：${text(tags.visualStyle || tags.summary, '优秀小红书海报样本')}；排版：${text(tags.textLayout, '借鉴其文字层级与装饰节奏')}；配色：${list(tags.colorPalette, 4).join('、') || '借鉴其协调关系'}`
+    }).join('\n')
+    : '没有额外风格样本，请采用精致、克制、有点击吸引力的小红书编辑设计。'
+  const retry = retryReason ? `\n【上一次失败原因】\n${text(retryReason).slice(0, 300)}。这次必须纠正。\n` : ''
+
+  return `【任务】
+图1是一张已经完成裁剪与拼接的 1080×1440、3:4 竖版实拍底图。请为它生成一张可直接覆盖的透明 PNG 装饰层。
+
+【输出介质——最高优先级】
+只输出与图1等比例、同构图的透明 RGBA 图层。画布未放置艺术字或装饰的区域必须保持真正透明（alpha=0），不得使用白色、黑色、棋盘格或重新绘制的照片充当背景。输出中不得出现图1的任何人物、景物、建筑、照片像素或拼图内容。
+
+【需要逐字呈现的文字】
+${exactText}
+只允许出现以上文字。必须使用简体中文并逐字准确，不得改写、增字、漏字、生成随机英文、Logo、价格、电话号码或二维码。
+
+【设计要求】
+根据图1的人物、主体、留白、明暗和色彩决定艺术字位置。不得遮挡人物面部、关键动作、建筑名称、重要道具或原图中已有文字。主标题醒目但不廉价，最多两行；副标题明显更小。可以使用与照片协调的描边、投影、局部半透明底板、关键词换色、短线、圆点、胶带、手绘箭头或少量贴纸，但装饰必须克制，不能吞没实拍主体。四周保留约 7% 安全边距。
+
+【风格参考】
+${styleNotes}
+图2及之后只用于借鉴版式、字体气质、配色、材质和装饰节奏，绝不能复制其中的人物、品牌、Logo、原文字、地点、价格或业务内容。
+
+【套图上下文】
+页面：${text(page.label, '实拍宣传图')}；页面作用：${text(page.purpose, '用实拍画面表达当前主题')}；统一规范：${text(page.visualContinuity, '醒目、清楚、与实拍照片协调')}；建议强调色：${text(page.accentColor, '从照片中选择协调色')}。
+${retry}
+最终只返回透明 PNG 装饰层，不要返回完成海报，不要解释。`
+}
+
+function buildRealPosterDecorationNegativePrompt() {
+  return [
+    '不透明背景', '白色背景', '黑色背景', '透明棋盘格', '重新绘制照片', '复制底图', '人物', '景物',
+    '修改人脸', '修改实拍内容', '额外文字', '错别字', '乱码', '随机英文', 'Logo', '二维码', '电话号码',
+    '价格标签', '水印', '廉价促销风', '装饰过多', '遮挡人物面部', '遮挡关键主体',
+  ].join('，')
+}
+
 function normalizeImageSettings(value = {}) {
   return {
     enabled: value.enabled !== false,
@@ -221,11 +267,12 @@ function buildImageApiRequest(settings, prompt, negativePrompt, seed, referenceI
   const maximum = /^qwen-image-2\.1/i.test(settings.model) ? 10 : 3
   const images = referenceImages.slice(0, maximum)
   const protocol = settings.protocol === 'openai' ? 'openai' : 'dashscope'
+  const supportsNegativePrompt = /^qwen-image-3\.0/i.test(settings.model)
   const common = {
     prompt_extend: true,
     prompt_extend_mode: 'direct',
     enable_thinking: settings.enableThinking,
-    negative_prompt: negativePrompt,
+    ...(supportsNegativePrompt && negativePrompt ? { negative_prompt: negativePrompt } : {}),
     seed,
     watermark: settings.watermark,
   }
@@ -293,6 +340,8 @@ module.exports = {
   VISUAL_MODE_DESCRIPTIONS,
   buildImageApiRequest,
   buildNegativePrompt,
+  buildRealPosterDecorationNegativePrompt,
+  buildRealPosterDecorationPrompt,
   buildReferenceUsePrompt,
   buildXhsImagePrompt,
   detectImageProtocol,

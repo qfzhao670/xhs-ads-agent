@@ -15,6 +15,8 @@ const {
   DEFAULT_IMAGE_SETTINGS,
   buildImageApiRequest,
   buildNegativePrompt,
+  buildRealPosterDecorationNegativePrompt,
+  buildRealPosterDecorationPrompt,
   buildXhsImagePrompt,
   formatImageApiError,
   normalizeImageSettings,
@@ -457,6 +459,77 @@ async function callImageModel(brief, references) {
   }
 }
 
+function selectRealPosterDecorationReferences(project, page, limit = 2) {
+  const searchable = `${page?.title || ''} ${page?.subtitle || ''} ${page?.purpose || ''} ${page?.promotionTheme || ''}`.toLowerCase()
+  return project.imageReferences
+    .filter((item) => item.enabled !== false && item.taggingStatus === 'ready')
+    .map((reference) => {
+      const tags = reference.tags || {}
+      const tagText = [tags.summary, tags.visualStyle, tags.textLayout, ...(tags.useCases || []), ...(tags.keywords || [])].join(' ').toLowerCase()
+      const keywordScore = searchable.split(/\s+/).filter((word) => word.length >= 2 && tagText.includes(word)).length
+      const roleScore = reference.isCover === (page?.role === 'cover') ? 5 : 0
+      const designScore = ['mixed', 'graphic'].includes(tags.visualMedium) ? 2 : 0
+      return { reference, score: roleScore + designScore + keywordScore }
+    })
+    .sort((left, right) => right.score - left.score || left.reference.id.localeCompare(right.reference.id))
+    .slice(0, limit)
+    .map((item) => item.reference)
+}
+
+function validatePngDataUrl(value) {
+  const match = String(value || '').match(/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/)
+  if (!match) throw new Error('实拍拼接底图格式不正确')
+  const buffer = Buffer.from(match[1], 'base64')
+  if (!buffer.length || buffer.length > 30 * 1024 * 1024) throw new Error('实拍拼接底图为空或过大')
+  return `data:image/png;base64,${buffer.toString('base64')}`
+}
+
+async function callRealPosterDecorationModel(project, page, baseDataUrl, retryReason = '') {
+  const { value } = await userConfig()
+  const settings = value.image
+  if (!settings.enabled) throw new Error('请先在“设置 → 图片模型”中启用图片生成功能')
+  if (!settings.apiKey || !settings.model || !settings.baseUrl) throw new Error('请完整填写图片模型的接口地址、API Key 和模型名称')
+  const references = selectRealPosterDecorationReferences(project, page)
+  const prompt = buildRealPosterDecorationPrompt(page, references, retryReason)
+  const negativePrompt = buildRealPosterDecorationNegativePrompt()
+  const seed = crypto.randomInt(0, 2147483647)
+  const referenceImages = [validatePngDataUrl(baseDataUrl), ...await Promise.all(references.map((reference) => imageDataUrl(resolveProjectFile(reference.relativePath))))]
+  const requestSettings = { ...settings, size: '1080x1440', count: 1, promptExtendMode: 'direct' }
+  const request = buildImageApiRequest(requestSettings, prompt, negativePrompt, seed, referenceImages)
+  if (!request.endpoint) throw new Error('图片模型接口地址不是有效的 HTTP(S) URL')
+  const requestHost = new URL(request.endpoint).hostname
+  if (request.protocol === 'openai' && ['dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com'].includes(requestHost)) {
+    throw new Error('Qwen Image 的 OpenAI 兼容方式需要百炼 Workspace 专属域名；请改填 llm-….maas.aliyuncs.com，或选择 DashScope 同步协议')
+  }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 600_000)
+  let response
+  try {
+    response = await fetch(request.endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey}` },
+      signal: controller.signal,
+      body: JSON.stringify(request.body),
+    })
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('AI 装饰生成超过 10 分钟，已停止等待；请稍后重试')
+    throw new Error(`无法连接图片模型接口：${error.message}`)
+  } finally { clearTimeout(timeout) }
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(formatImageApiError(response.status, body, request.endpoint, settings.model))
+  }
+  const data = await response.json()
+  const parsed = parseImageApiResponse(data)
+  if (!parsed.urls.length) throw new Error(`图片模型没有返回透明装饰层：${JSON.stringify(data).slice(0, 500)}`)
+  return {
+    url: parsed.urls[0], prompt, negativePrompt, seed,
+    requestId: parsed.requestId || response.headers.get('x-request-id') || '',
+    referenceImageIds: references.map((reference) => reference.id),
+    model: settings.model,
+  }
+}
+
 function projectRelative(file) { return path.relative(currentRoot, file).split(path.sep).join('/') }
 function resolveProjectFile(relativeFile) {
   const absolute = path.resolve(currentRoot, String(relativeFile || ''))
@@ -481,6 +554,7 @@ async function downloadGeneratedImage(url, file) {
   if (!buffer.length) throw new Error('下载到的生成图片为空')
   if (buffer.length > 30 * 1024 * 1024) throw new Error('生成图片超过 30MB，已停止保存')
   await writeBuffer(file, buffer)
+  return buffer
 }
 async function saveImageTasks(tasks) { await writeJson(outputPath(IMAGE_TASKS_FILE), tasks) }
 async function saveImageTaskArtifacts(task) {
@@ -2089,6 +2163,86 @@ function findImageTaskContext(project, taskId) {
   }
   return null
 }
+
+ipcMain.handle('real-poster:generate-decoration', async (_event, taskId, pageId, baseDataUrl, retryReason) => {
+  try {
+    const project = await loadProject()
+    const task = project?.imageTasks.find((item) => item.id === String(taskId))
+    if (!task || task.mode !== 'real_photo_poster') throw new Error('没有找到要进行 AI 装饰的实拍宣传图')
+    const page = task.plan.pages.find((item) => item.id === String(pageId))
+    if (!page) throw new Error('没有找到要进行 AI 装饰的页面')
+    if (!(page.sourcePhotoIds || []).length) throw new Error('请先为这一页选择实拍图片')
+    if (!String(page.title || '').trim()) throw new Error('请先填写宣传图主标题')
+    const generated = await callRealPosterDecorationModel(
+      project,
+      { ...page, visualContinuity: task.plan.visualContinuity },
+      baseDataUrl,
+      String(retryReason || '').trim(),
+    )
+    const folder = resolveProjectFile(task.artifactDir)
+    const stamp = Date.now()
+    const overlayFile = path.join(folder, `${page.id.toLowerCase()}-ai-overlay-${stamp}.png`)
+    const overlayBuffer = await downloadGeneratedImage(generated.url, overlayFile)
+    return {
+      ok: true,
+      imageUrl: `data:image/png;base64,${overlayBuffer.toString('base64')}`,
+      overlayRelativePath: projectRelative(overlayFile),
+      model: generated.model,
+      prompt: generated.prompt,
+      negativePrompt: generated.negativePrompt,
+      seed: generated.seed,
+      requestId: generated.requestId,
+      referenceImageIds: generated.referenceImageIds,
+    }
+  } catch (error) { return { ok: false, error: error.message } }
+})
+
+ipcMain.handle('real-poster:save-decoration', async (_event, taskId, pageId, baseImageId, dataUrl, decoration) => {
+  try {
+    const project = await loadProject()
+    const taskIndex = project.imageTasks.findIndex((item) => item.id === String(taskId))
+    if (taskIndex < 0) throw new Error('没有找到要保存的实拍宣传图任务')
+    const tasks = [...project.imageTasks]
+    const task = normalizeImageTask(tasks[taskIndex])
+    if (task.mode !== 'real_photo_poster') throw new Error('当前任务不是实拍宣传图')
+    const page = task.plan.pages.find((item) => item.id === String(pageId))
+    if (!page) throw new Error('没有找到要保存 AI 装饰的页面')
+    const baseImage = task.images.find((item) => item.id === String(baseImageId) && item.pageId === page.id)
+    if (!baseImage) throw new Error('AI 装饰所使用的基础版本已不存在，请重新生成')
+    const match = String(dataUrl || '').match(/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/)
+    if (!match) throw new Error('AI 装饰合成结果格式不正确')
+    const buffer = Buffer.from(match[1], 'base64')
+    if (!buffer.length || buffer.length > 30 * 1024 * 1024) throw new Error('AI 装饰合成结果为空或过大')
+    const overlayRelativePath = String(decoration?.overlayRelativePath || '')
+    const overlayFile = resolveProjectFile(overlayRelativePath)
+    const artifactFolder = `${path.resolve(resolveProjectFile(task.artifactDir))}${path.sep}`
+    if (!overlayFile.startsWith(artifactFolder) || !await exists(overlayFile)) throw new Error('AI 装饰层文件无效或已经丢失')
+    const folder = resolveProjectFile(task.artifactDir)
+    const revision = task.images.filter((item) => item.pageId === page.id).length + 1
+    const stamp = Date.now()
+    const file = path.join(folder, `${page.id.toLowerCase()}-v${String(revision).padStart(2, '0')}-ai-${stamp}.png`)
+    await writeBuffer(file, buffer)
+    const image = {
+      id: `${task.id}-${page.id}-${stamp}`, pageId: page.id, revision,
+      feedback: '一键 AI 装饰', relativePath: projectRelative(file), createdAt: now(),
+      model: String(decoration?.model || 'image-model'), size: '1080x1440',
+      seed: Number(decoration?.seed) || 0, requestId: String(decoration?.requestId || ''),
+      prompt: String(decoration?.prompt || ''), negativePrompt: String(decoration?.negativePrompt || ''),
+      referenceImageIds: Array.isArray(decoration?.referenceImageIds) ? decoration.referenceImageIds.map(String).slice(0, 3) : [],
+      sourcePhotoIds: page.sourcePhotoIds, renderType: 'real_photo_ai_decorated',
+      baseImageId: baseImage.id, overlayRelativePath,
+    }
+    task.images = [...task.images, image]
+    task.currentImageIds = { ...task.currentImageIds, [page.id]: image.id }
+    task.prompt = image.prompt
+    task.negativePrompt = image.negativePrompt
+    task.updatedAt = now()
+    tasks[taskIndex] = task
+    await saveImageTasks(tasks)
+    await saveImageTaskArtifacts(task)
+    return { ok: true, data: await loadProject(), pageId: page.id }
+  } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
+})
 
 ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl, pageUpdate) => {
   try {

@@ -99,7 +99,7 @@ function wrapTitle(context: CanvasRenderingContext2D, text: string, maxWidth: nu
   return lines.slice(0, 2)
 }
 
-async function renderRealPoster(page: ImagePlanPage, photos: RealPhoto[], sources: Record<string, string>, allowEmptySlots: boolean) {
+async function renderRealPoster(page: ImagePlanPage, photos: RealPhoto[], sources: Record<string, string>, allowEmptySlots: boolean, drawTextLayer: boolean) {
   const slots = (page.sourcePhotoIds || []).map((id) => photos.find((photo) => photo.id === id) || null)
   const selected = slots.filter(Boolean) as RealPhoto[]
   if (!selected.length && !allowEmptySlots) throw new Error(`${page.label}没有可用的实拍图片`)
@@ -144,6 +144,8 @@ async function renderRealPoster(page: ImagePlanPage, photos: RealPhoto[], source
     context.textBaseline = 'top'
   })
 
+  if (!drawTextLayer) return canvas.toDataURL('image/png')
+
   const top = page.textPosition === 'top'
   const gradient = context.createLinearGradient(0, top ? 0 : HEIGHT, 0, top ? 470 : HEIGHT - 520)
   gradient.addColorStop(0, 'rgba(8, 12, 20, .86)')
@@ -185,9 +187,44 @@ async function renderRealPoster(page: ImagePlanPage, photos: RealPhoto[], source
 }
 
 export async function renderRealPosterPage(page: ImagePlanPage, photos: RealPhoto[], sources: Record<string, string>) {
-  return renderRealPoster(page, photos, sources, false)
+  return renderRealPoster(page, photos, sources, false, true)
 }
 
 export async function renderRealPosterPreview(page: ImagePlanPage, photos: RealPhoto[], sources: Record<string, string>) {
-  return renderRealPoster(page, photos, sources, true)
+  return renderRealPoster(page, photos, sources, true, true)
+}
+
+export async function renderRealPosterBasePage(page: ImagePlanPage, photos: RealPhoto[], sources: Record<string, string>) {
+  return renderRealPoster(page, photos, sources, false, false)
+}
+
+export async function compositeRealPosterDecoration(baseSource: string, overlaySource: string) {
+  const [base, overlay] = await Promise.all([loadImage(baseSource), loadImage(overlaySource)])
+  const inspectionCanvas = document.createElement('canvas')
+  inspectionCanvas.width = overlay.naturalWidth
+  inspectionCanvas.height = overlay.naturalHeight
+  const inspection = inspectionCanvas.getContext('2d', { willReadFrequently: true })
+  if (!inspection) throw new Error('当前环境不支持检查 AI 装饰层')
+  inspection.drawImage(overlay, 0, 0)
+  const pixels = inspection.getImageData(0, 0, inspectionCanvas.width, inspectionCanvas.height).data
+  let transparent = 0
+  let sampled = 0
+  const pixelStep = Math.max(1, Math.floor((inspectionCanvas.width * inspectionCanvas.height) / 120_000))
+  for (let pixel = 0; pixel < inspectionCanvas.width * inspectionCanvas.height; pixel += pixelStep) {
+    if (pixels[pixel * 4 + 3] < 16) transparent += 1
+    sampled += 1
+  }
+  const transparentRatio = sampled ? transparent / sampled : 0
+  if (transparentRatio < 0.2) {
+    throw new Error('图片模型没有返回透明装饰层，而是生成了不透明整图')
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = WIDTH
+  canvas.height = HEIGHT
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('当前环境不支持合成 AI 装饰层')
+  context.drawImage(base, 0, 0, WIDTH, HEIGHT)
+  context.drawImage(overlay, 0, 0, WIDTH, HEIGHT)
+  return { dataUrl: canvas.toDataURL('image/png'), transparentRatio }
 }

@@ -842,6 +842,9 @@ button.generation-history-trigger { padding-inline: 13px 11px; }
 .story-actions { display: flex; flex-wrap: wrap; gap: 5px; padding: 9px 10px; }
 .story-actions button { flex: 1 1 auto; min-width: 78px; }
 .story-actions button.active { border-color: #93c5fd; color: var(--blue-dark); background: var(--blue-soft); }
+.story-actions .ai-decoration-button { flex-basis: 100%; border-color: #7c3aed; background: linear-gradient(135deg, #7c3aed, #db2777); box-shadow: 0 4px 12px rgba(124, 58, 237, .2); }
+.story-actions .ai-decoration-button:hover:not(:disabled) { border-color: #6d28d9; background: linear-gradient(135deg, #6d28d9, #be185d); }
+.story-image-busy.ai-decoration-busy { background: radial-gradient(circle at 50% 30%, rgba(124, 58, 237, .76), rgba(15, 23, 42, .88) 72%); }
 .story-create-card { display: flex; width: 100%; min-height: 520px; aspect-ratio: 3 / 5; align-items: center; justify-content: center; flex-direction: column; gap: 7px; align-self: start; border: 2px dashed #b9c7d8; border-radius: 10px; color: #64748b; background: #fbfcfe; box-shadow: none; }
 .story-create-card:hover:not(:disabled) { border-color: #6b91cb; color: #315f9e; background: #f5f8fd; transform: none; }
 .story-create-card:focus-visible { outline: 3px solid rgba(59, 130, 246, .2); outline-offset: 3px; }

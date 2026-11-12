@@ -3,6 +3,8 @@ const assert = require('node:assert/strict')
 const {
   buildImageApiRequest,
   buildNegativePrompt,
+  buildRealPosterDecorationNegativePrompt,
+  buildRealPosterDecorationPrompt,
   buildReferenceUsePrompt,
   buildXhsImagePrompt,
   detectImageProtocol,
@@ -96,6 +98,26 @@ test('negative prompt includes defaults and project-specific exclusions', () => 
   assert.match(prompt, /红色背景/)
   assert.match(prompt, /纯插画/)
   assert.match(prompt, /纸张拼贴/)
+})
+
+test('builds an overlay-only real poster decoration prompt with exact copy', () => {
+  const prompt = buildRealPosterDecorationPrompt({
+    label: '封面',
+    title: '周末去看一场鹤舞',
+    subtitle: '在真实现场遇见非遗',
+    purpose: '突出现场体验',
+    accentColor: '#c94135',
+  }, [{ tags: { visualStyle: '现代中文杂志感', textLayout: '左上粗标题', colorPalette: ['米白', '朱红'] } }])
+  assert.match(prompt, /透明 RGBA 图层/)
+  assert.match(prompt, /alpha=0/)
+  assert.match(prompt, /主标题：“周末去看一场鹤舞”/)
+  assert.match(prompt, /副标题：“在真实现场遇见非遗”/)
+  assert.match(prompt, /不得使用白色、黑色、棋盘格/)
+  assert.match(prompt, /现代中文杂志感/)
+  assert.match(prompt, /最终只返回透明 PNG 装饰层/)
+  const negative = buildRealPosterDecorationNegativePrompt()
+  assert.match(negative, /重新绘制照片/)
+  assert.match(negative, /不透明背景/)
 })
 
 test('mixed visual mode requires a real-scene base without banning editorial overlays', () => {
@@ -199,6 +221,13 @@ test('limits qwen image 3.0 to three ordered reference images', () => {
   const settings = normalizeImageSettings({ enabled: true, model: 'qwen-image-3.0-pro' })
   const request = buildImageApiRequest(settings, '提示词', '乱码', 123, ['1', '2', '3', '4'])
   assert.deepEqual(request.body.input.messages[0].content, [{ image: '1' }, { image: '2' }, { image: '3' }, { text: '提示词' }])
+})
+
+test('omits unsupported negative prompts for qwen image 2.1 transparent editing', () => {
+  const settings = normalizeImageSettings({ enabled: true, model: 'qwen-image-2.1-pro' })
+  const request = buildImageApiRequest(settings, '只生成透明装饰层', '不透明背景', 123, ['base', 'style'])
+  assert.equal(request.body.parameters.negative_prompt, undefined)
+  assert.deepEqual(request.body.input.messages[0].content, [{ image: 'base' }, { image: 'style' }, { text: '只生成透明装饰层' }])
 })
 
 test('parses image URLs from DashScope and OpenAI-compatible responses', () => {

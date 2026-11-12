@@ -6,8 +6,9 @@ import {
   Sparkles, Trash2, Upload, WandSparkles, X,
 } from 'lucide-react'
 import {
+  compositeRealPosterDecoration,
   defaultRealPosterLayout, REAL_POSTER_LAYOUTS, realPosterLayoutRects,
-  renderRealPosterPage, renderRealPosterPreview,
+  renderRealPosterBasePage, renderRealPosterPage, renderRealPosterPreview,
 } from './real-poster-renderer'
 
 type Page = 'generate' | 'library' | 'assets' | 'settings'
@@ -544,6 +545,54 @@ function App() {
     } catch (e) { showError(e instanceof Error ? e.message : '实拍宣传图保存失败'); return false }
     finally { setBusy('') }
   }
+  async function decorateRealPosterPage(taskId: string, pageId: string, sources: Record<string, string>) {
+    if (!project) return false
+    setBusy(`real-poster-ai:${pageId}`); setError('')
+    try {
+      const task = project.imageTasks.find((item) => item.id === taskId)
+      const page = task?.plan.pages.find((item) => item.id === pageId)
+      const currentImage = task?.images.find((item) => item.id === task.currentImageIds?.[pageId])
+      const localBaseImage = currentImage?.renderType !== 'real_photo_ai_decorated'
+        ? currentImage
+        : [...(task?.images || [])].reverse().find((item) => item.pageId === pageId && item.renderType !== 'real_photo_ai_decorated')
+      const baseImageId = localBaseImage?.id
+      if (!task || !page || !baseImageId) throw new Error('请先生成并保存这一页实拍宣传图')
+      const missingPhoto = (page.sourcePhotoIds || []).find((id) => !sources[id])
+      if (missingPhoto) throw new Error(`实拍素材 ${missingPhoto} 尚未加载完成，请稍后重试`)
+      const baseDataUrl = await renderRealPosterBasePage(page, project.realPhotos, sources)
+      let lastError: Error | null = null
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const generated = await window.workshop.generateRealPosterDecoration(task.id, page.id, baseDataUrl, attempt ? lastError?.message : '')
+        if (!generated.ok || !generated.imageUrl || !generated.overlayRelativePath) throw new Error(generated.error || '图片模型没有返回可用的透明装饰层')
+        try {
+          const composited = await compositeRealPosterDecoration(baseDataUrl, generated.imageUrl)
+          const metadata: RealPosterDecorationMetadata = {
+            overlayRelativePath: generated.overlayRelativePath,
+            model: generated.model || 'image-model',
+            prompt: generated.prompt || '',
+            negativePrompt: generated.negativePrompt || '',
+            seed: generated.seed || 0,
+            requestId: generated.requestId || '',
+            referenceImageIds: generated.referenceImageIds || [],
+          }
+          const saved = await window.workshop.saveRealPosterDecoration(task.id, page.id, baseImageId, composited.dataUrl, metadata)
+          if (!saved.ok || !saved.data) throw new Error(saved.error || '保存 AI 装饰版本失败')
+          setProject(saved.data)
+          flash(`${page.label}已生成 AI 装饰版本，原来的本地版本仍然保留`)
+          return true
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error('AI 装饰层合成失败')
+          if (attempt === 0 && /透明装饰层|不透明整图/.test(lastError.message)) continue
+          if (/透明装饰层|不透明整图/.test(lastError.message)) {
+            throw new Error(`${lastError.message}。当前模型可能不支持透明图层，建议在图片模型设置中使用 qwen-image-2.1-pro 后重试`)
+          }
+          throw lastError
+        }
+      }
+      throw lastError || new Error('AI 装饰生成失败')
+    } catch (e) { showError(e instanceof Error ? e.message : '一键 AI 装饰失败'); return false }
+    finally { setBusy('') }
+  }
   async function deleteAsset(kind: AssetKind, id: string) {
     if (!window.confirm(`确定删除 ${id}？该编号之后不会再分配给新记录。`)) return
     await run('delete', () => window.workshop.deleteAsset(kind, id), '记录已删除')
@@ -654,6 +703,7 @@ function App() {
           createImageSet={(version) => run('image-set', () => window.workshop.createImageSet(version), '整套配图已生成并保存到项目')}
           createRealPosterSet={createRealPosterSet}
           saveRealPosterEdit={saveRealPosterEdit}
+          decorateRealPosterPage={decorateRealPosterPage}
           regenerateImage={(taskId, pageId, feedback) => run(`image-regenerate:${pageId}`, () => window.workshop.regenerateImagePage(taskId, pageId, feedback), feedback ? '已按建议生成新版本' : '已改写提示词并生成新版本')}
           exportImage={async (taskId, imageId) => { const result = await window.workshop.exportGeneratedImage(taskId, imageId); if (!result.ok) showError(result.error); else if (result.savedPath) flash('图片已导出') }}
           exportImageSet={async (taskId) => { const result = await window.workshop.exportImageSet(taskId); if (!result.ok) showError(result.error); else if (result.savedPath) flash('整套图片已导出') }}
@@ -700,6 +750,7 @@ type GenerationPageProps = {
   createImageSet: (version: number) => Promise<boolean>;
   createRealPosterSet: (version: number) => Promise<boolean>;
   saveRealPosterEdit: (taskId: string, page: RealPosterPageUpdate) => Promise<boolean>;
+  decorateRealPosterPage: (taskId: string, pageId: string, sources: Record<string, string>) => Promise<boolean>;
   regenerateImage: (taskId: string, pageId: string, feedback: string) => Promise<boolean>;
   exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void;
   goReferenceLibrary: () => void;
@@ -814,7 +865,7 @@ function CurrentFlow(props: GenerationPageProps) {
   if (flowStep === 4) return <StrategyStep project={project} busy={props.busy} thinking={props.thinkingModes.strategies} setThinking={(value) => props.setThinkingMode('strategies', value)} generate={props.generateStrategies} choice={props.choice} setChoice={props.setChoice} strategyAdvice={props.strategyAdvice} setStrategyAdvice={props.setStrategyAdvice} save={props.saveStrategy} />
   if (flowStep === 5) return <ComposeStep project={project} strategies={props.selectedStrategies} busy={props.busy} thinking={props.thinkingModes.draft} setThinking={(value) => props.setThinkingMode('draft', value)} generate={props.generateDraft} back={() => props.setFlowStep(4)} />
   if (flowStep === 6) return <ReviewStep key={props.draft?.version ?? 'empty'} project={project} draft={props.draft} viewVersion={props.viewVersion} setViewVersion={props.setViewVersion} revision={props.revision} setRevision={props.setRevision} busy={props.busy} thinking={props.thinkingModes.revise} setThinking={(value) => props.setThinkingMode('revise', value)} revise={props.revise} saveManual={props.saveManual} confirm={props.confirm} goImages={() => props.setFlowStep(7)} />
-  if (flowStep === 7) return <ImageStep project={project} busy={props.busy} stream={props.stream} imageProgress={props.imageProgress} createImageSet={props.createImageSet} createRealPosterSet={props.createRealPosterSet} saveRealPosterEdit={props.saveRealPosterEdit} regenerateImage={props.regenerateImage} exportImage={props.exportImage} exportImageSet={props.exportImageSet} goReferenceLibrary={props.goReferenceLibrary} goRealPhotoLibrary={props.goRealPhotoLibrary} goArchive={() => props.setFlowStep(8)} />
+  if (flowStep === 7) return <ImageStep project={project} busy={props.busy} stream={props.stream} imageProgress={props.imageProgress} createImageSet={props.createImageSet} createRealPosterSet={props.createRealPosterSet} saveRealPosterEdit={props.saveRealPosterEdit} decorateRealPosterPage={props.decorateRealPosterPage} regenerateImage={props.regenerateImage} exportImage={props.exportImage} exportImageSet={props.exportImageSet} goReferenceLibrary={props.goReferenceLibrary} goRealPhotoLibrary={props.goRealPhotoLibrary} goArchive={() => props.setFlowStep(8)} />
   return <ArchiveStep project={project} busy={props.busy} archiveFinal={props.archiveFinal} goImages={() => props.setFlowStep(7)} />
 }
 
@@ -903,10 +954,11 @@ function ReviewStep({ project, draft, viewVersion, setViewVersion, revision, set
   </section>
 }
 
-function ImageStep({ project, busy, stream, imageProgress, createImageSet, createRealPosterSet, saveRealPosterEdit, regenerateImage, exportImage, exportImageSet, goReferenceLibrary, goRealPhotoLibrary, goArchive }: {
+function ImageStep({ project, busy, stream, imageProgress, createImageSet, createRealPosterSet, saveRealPosterEdit, decorateRealPosterPage, regenerateImage, exportImage, exportImageSet, goReferenceLibrary, goRealPhotoLibrary, goArchive }: {
   project: ProjectData; busy: string; stream: { operation: string; content: string; thinking: string; done: boolean }; imageProgress: Record<string, ImageProgressEvent>;
   createImageSet: (version: number) => Promise<boolean>; createRealPosterSet: (version: number) => Promise<boolean>;
   saveRealPosterEdit: (taskId: string, page: RealPosterPageUpdate) => Promise<boolean>;
+  decorateRealPosterPage: (taskId: string, pageId: string, sources: Record<string, string>) => Promise<boolean>;
   regenerateImage: (taskId: string, pageId: string, feedback: string) => Promise<boolean>;
   exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void;
   goReferenceLibrary: () => void; goRealPhotoLibrary: () => void; goArchive: () => void;
@@ -1019,13 +1071,14 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
           ? (page.sourcePhotoIds || []).map((id) => project.realPhotos.find((item) => item.id === id)).filter(Boolean) as RealPhoto[]
           : (page.referenceImageIds || []).map((id) => project.imageReferences.find((item) => item.id === id)).filter(Boolean) as ImageReference[]
         const regenerating = !isReal && busy === `image-regenerate:${page.id}`
+        const aiDecorating = isReal && busy === `real-poster-ai:${page.id}`
         const generating = generatingSet && !image
         const editing = editingPage === page.id
         return <article key={page.id} className={`story-page ${page.role === 'cover' ? 'cover' : ''} ${generating ? 'is-generating' : ''} ${imageUrls[image?.id || ''] ? 'is-revealed' : ''}`}>
-          <div className="story-image">{image && imageUrls[image.id] ? <img src={imageUrls[image.id]} alt={`${page.label}：${page.title}`} /> : <div className={`story-image-empty ${generating ? 'generation-canvas' : ''}`}>{generating ? <><div className="canvas-orb" /><i className="canvas-scan" /><LoaderCircle className="spin" size={22} /><b>正在制作{page.label}</b></> : <><ImageIcon size={25} /><span>等待生成</span></>}</div>}<span className="story-index">{String(index + 1).padStart(2, '0')}</span><span className="story-role">{page.label}</span>{regenerating && <div className="story-image-busy"><LoaderCircle className="spin" size={25} /><b>正在更新{page.label}</b></div>}</div>
-          <div className="story-copy"><div><h3>{page.title}</h3><p>{isReal ? page.groupReason || page.purpose : page.purpose}</p></div><span>{isReal && page.needsReview ? '相关性较弱，建议确认' : `版本 ${Math.max(1, revisions)}`}</span></div>
+          <div className="story-image">{image && imageUrls[image.id] ? <img src={imageUrls[image.id]} alt={`${page.label}：${page.title}`} /> : <div className={`story-image-empty ${generating ? 'generation-canvas' : ''}`}>{generating ? <><div className="canvas-orb" /><i className="canvas-scan" /><LoaderCircle className="spin" size={22} /><b>正在制作{page.label}</b></> : <><ImageIcon size={25} /><span>等待生成</span></>}</div>}<span className="story-index">{String(index + 1).padStart(2, '0')}</span><span className="story-role">{page.label}</span>{regenerating && <div className="story-image-busy"><LoaderCircle className="spin" size={25} /><b>正在更新{page.label}</b></div>}{aiDecorating && <div className="story-image-busy ai-decoration-busy"><LoaderCircle className="spin" size={25} /><b>AI 正在设计艺术字与装饰</b><span>原来的本地版本不会被覆盖</span></div>}</div>
+          <div className="story-copy"><div><h3>{page.title}</h3><p>{isReal ? page.groupReason || page.purpose : page.purpose}</p></div><span>{isReal && image?.renderType === 'real_photo_ai_decorated' ? 'AI 装饰版' : isReal && page.needsReview ? '相关性较弱，建议确认' : `版本 ${Math.max(1, revisions)}`}</span></div>
           {isReal ? <RealPhotoMatchList page={page} references={references as RealPhoto[]} imageUrls={imageUrls} /> : <div className="story-references"><span>本页参考</span><div>{(references as ImageReference[]).map((reference) => { const summary = reference.tags.summary; return <span key={reference.id} title={summary}>{imageUrls[reference.id] ? <img src={imageUrls[reference.id]} alt={summary} /> : <ImageIcon size={14} />}<small>{reference.id}</small></span> })}</div></div>}
-          <div className="story-actions"><button className="text-button" onClick={() => image && exportImage(task!.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button>{isReal ? <button className="secondary compact" onClick={() => setPosterEditorPageId(page.id)} disabled={!!busy}><PenLine size={14} />{image ? '编辑图片' : '手动选图'}</button> : <><button className="secondary compact" onClick={() => regenerateImage(task!.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button><button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button></>}</div>
+          <div className="story-actions"><button className="text-button" onClick={() => image && exportImage(task!.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button>{isReal ? <><button className="secondary compact" onClick={() => setPosterEditorPageId(page.id)} disabled={!!busy}><PenLine size={14} />{image ? '编辑图片' : '手动选图'}</button><button className="primary compact ai-decoration-button" onClick={() => decorateRealPosterPage(task!.id, page.id, imageUrls)} disabled={!image || !!busy}>{aiDecorating ? <LoaderCircle className="spin" size={14} /> : <WandSparkles size={14} />}{aiDecorating ? 'AI 装饰中' : '一键 AI 装饰'}</button></> : <><button className="secondary compact" onClick={() => regenerateImage(task!.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button><button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button></>}</div>
           {!isReal && editing && <div className="story-feedback"><label htmlFor={`feedback-${page.id}`}>你希望怎么改？</label><textarea id={`feedback-${page.id}`} rows={3} value={feedbacks[page.id] || ''} onChange={(event) => setFeedbacks({ ...feedbacks, [page.id]: event.target.value })} /><button className="primary compact" onClick={async () => { const ok = await regenerateImage(task!.id, page.id, feedbacks[page.id] || ''); if (ok) setEditingPage('') }} disabled={!feedbacks[page.id]?.trim() || !!busy}><WandSparkles size={14} />按要求重新生成</button></div>}
         </article>
       })}{isReal && <button className="story-create-card" onClick={startManualPosterPage} disabled={!!busy || pages.length >= 12} aria-label="手动新建图片"><span><Plus size={24} /></span><b>{pages.length >= 12 ? '已达到 12 张上限' : '手动新建图片'}</b><small>选择实拍素材并编辑排版</small></button>}</div>

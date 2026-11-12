@@ -49,6 +49,8 @@ contextBridge.exposeInMainWorld('workshop', {
   createImageSet: (version) => ipcRenderer.invoke('image:create-set', version),
   createRealPosterPlan: (version) => ipcRenderer.invoke('real-poster:create-plan', version),
   saveRealPosterPage: (taskId, pageId, dataUrl, pageUpdate) => ipcRenderer.invoke('real-poster:save-page', taskId, pageId, dataUrl, pageUpdate),
+  generateRealPosterDecoration: (taskId, pageId, baseDataUrl, retryReason) => ipcRenderer.invoke('real-poster:generate-decoration', taskId, pageId, baseDataUrl, retryReason),
+  saveRealPosterDecoration: (taskId, pageId, baseImageId, dataUrl, decoration) => ipcRenderer.invoke('real-poster:save-decoration', taskId, pageId, baseImageId, dataUrl, decoration),
   regenerateImagePage: (taskId, pageId, feedback) => ipcRenderer.invoke('image:regenerate-page', taskId, pageId, feedback),
   readGeneratedImage: (relativePath) => ipcRenderer.invoke('image:read', relativePath),
   exportGeneratedImage: (taskId, imageId) => ipcRenderer.invoke('image:export', taskId, imageId),
