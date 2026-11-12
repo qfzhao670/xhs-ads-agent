@@ -111,7 +111,7 @@ type RealPhotoVisualTags = {
   dominantColors: string[]; quality: 'high' | 'medium' | 'low'; textSafeArea: 'top' | 'bottom' | 'left' | 'right' | 'none'
 }
 type RealPhotoTags = {
-  originalDescription: string; businessRelation: string; themeTags: string[]; sceneTags: string[];
+  originalDescription: string; visibleText: string[]; businessContext: string; businessRelation?: string; themeTags: string[]; sceneTags: string[];
   subjectTags: string[]; actionTags: string[]; visualTags: RealPhotoVisualTags
 }
 type RealPhoto = {
@@ -154,9 +154,11 @@ type GeneratedImage = {
 type ImagePlanPage = {
   id: string; role: 'cover' | 'content' | 'summary'; label: string; purpose: string; title: string; referenceImageIds: string[]; brief: ImageBrief;
   promotionTheme?: string; subtitle?: string; sourcePhotoIds?: string[]; groupReason?: string; evidenceQuotes?: string[];
-  relevanceLevel?: 'direct' | 'supporting'; relevanceReason?: string;
+  photoMatches?: RealPhotoMatch[]; relevanceLevel?: RealPhotoMatchLevel; relevanceReason?: string; needsReview?: boolean;
   layoutTemplateId?: string; textPosition?: 'top' | 'bottom'; accentColor?: string
 }
+type RealPhotoMatchLevel = 'direct' | 'supporting' | 'contextual' | 'fallback' | 'conflicting'
+type RealPhotoMatch = { photoId: string; relevanceLevel: RealPhotoMatchLevel; evidenceQuotes: string[]; reason: string }
 type RealPosterPageUpdate = Pick<ImagePlanPage, 'id' | 'title' | 'subtitle' | 'sourcePhotoIds' | 'layoutTemplateId' | 'textPosition' | 'accentColor'>
 type ImagePlan = { version: number; concept: string; visualContinuity: string; pages: ImagePlanPage[] }
 type ImageTask = {

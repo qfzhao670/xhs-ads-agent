@@ -492,14 +492,16 @@ function App() {
         return [id, result.imageUrl] as const
       }))
       const sources = Object.fromEntries(entries)
+      let manualPages = 0
       for (const page of task.plan.pages) {
+        if (!(page.sourcePhotoIds || []).length) { manualPages += 1; continue }
         const dataUrl = await renderRealPosterPage(page, current.realPhotos, sources)
         const saved = await window.workshop.saveRealPosterPage(task.id, page.id, dataUrl)
         if (!saved.ok || !saved.data) throw new Error(saved.error || `保存${page.label}失败`)
         current = saved.data
         setProject(current)
       }
-      flash('实拍宣传图已完成并保存到项目')
+      flash(manualPages ? '实拍宣传图初稿已创建，请为待确认页面手动选择图片' : '实拍宣传图已完成并保存到项目')
       return true
     } catch (e) { showError(e instanceof Error ? e.message : '实拍宣传图制作失败'); return false }
     finally { setBusy('') }
@@ -695,6 +697,32 @@ function imageTaskComplete(task?: ImageTask) {
   if (!task) return false
   const pages = task.plan?.pages || []
   return pages.length >= (task.mode === 'real_photo_poster' ? 1 : 4) && pages.every((page) => Boolean(task.currentImageIds?.[page.id]))
+}
+
+const realPhotoMatchMeta: Record<RealPhotoMatchLevel | 'unknown', { grade: string; label: string }> = {
+  direct: { grade: 'A', label: '直接匹配' },
+  supporting: { grade: 'B', label: '辅助匹配' },
+  contextual: { grade: 'C', label: '情境匹配' },
+  fallback: { grade: 'D', label: '兜底素材' },
+  conflicting: { grade: '—', label: '明确冲突' },
+  unknown: { grade: '·', label: '未评级' },
+}
+
+function RealPhotoMatchBadge({ match }: { match?: RealPhotoMatch }) {
+  const level = match?.relevanceLevel || 'unknown'
+  const meta = realPhotoMatchMeta[level]
+  const detail = match?.reason || (level === 'unknown' ? '旧方案或手动选择的图片，尚未经过本页匹配评级' : meta.label)
+  return <span className={`real-match-grade match-${level}`} title={detail} aria-label={`匹配等级：${meta.grade}，${meta.label}`}><i aria-hidden="true" /><b>{meta.grade}</b><span>{meta.label}</span></span>
+}
+
+function RealPhotoMatchList({ page, references, imageUrls }: { page: ImagePlanPage; references: RealPhoto[]; imageUrls: Record<string, string> }) {
+  const matches = new Map((page.photoMatches || []).map((item) => [item.photoId, item]))
+  return <div className="real-match-panel"><div className="real-match-heading"><span>本页实拍</span><small>{references.length} 张，按匹配优先级排列</small></div><div className="real-match-grid">{references.map((reference) => {
+    const match = matches.get(reference.id)
+    const summary = reference.tags.originalDescription || reference.originalName
+    const detail = [summary, match?.reason].filter(Boolean).join('；')
+    return <div key={reference.id} className="real-match-item" title={detail}><span className="real-match-thumb">{imageUrls[reference.id] ? <img src={imageUrls[reference.id]} alt={summary} /> : <ImageIcon size={14} />}</span><span className="real-match-info"><small>{reference.id}</small><RealPhotoMatchBadge match={match} /></span></div>
+  })}</div></div>
 }
 
 function archivedCompleted(record: GenerationRecord) {
@@ -912,7 +940,7 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
       <button className={!isReal ? 'active' : ''} onClick={() => setImageMode('ai_generated')}><WandSparkles size={18} /><span><b>AI 生成套图</b><small>按参考样本生成新画面</small></span></button>
       <button className={isReal ? 'active real' : 'real'} onClick={() => setImageMode('real_photo_poster')}><ImageIcon size={18} /><span><b>实拍宣传图</b><small>原图拼接并覆盖艺术字</small></span></button>
     </div>
-    {!ready && <div className="reference-readiness"><ImageIcon size={20} /><div><b>{isReal ? '先建立业务实拍图库' : '先建立小红书图片参考库'}</b><span>{isReal ? '上传真实业务照片，系统会结合业务原始素材生成描述和分类标签。' : '上传你认可的封面和内容页，完成视觉打标后再生成。'}</span></div><button className="secondary compact" onClick={isReal ? goRealPhotoLibrary : goReferenceLibrary}><Upload size={15} />去上传{isReal ? '实拍' : '样本'}</button></div>}
+    {!ready && <div className="reference-readiness"><ImageIcon size={20} /><div><b>{isReal ? '先建立业务实拍图库' : '先建立小红书图片参考库'}</b><span>{isReal ? '上传真实业务照片，系统会客观描述画面内容，再按当前文案排序选图。' : '上传你认可的封面和内容页，完成视觉打标后再生成。'}</span></div><button className="secondary compact" onClick={isReal ? goRealPhotoLibrary : goReferenceLibrary}><Upload size={15} />去上传{isReal ? '实拍' : '样本'}</button></div>}
     <div className="image-document-tabs">{confirmedDrafts.map((item, index) => {
       const itemTasks = project.imageTasks.filter((candidate) => candidate.draftVersion === item.version)
       const done = itemTasks.some(imageTaskComplete)
@@ -921,12 +949,12 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
     })}</div>
 
     {generatingSet && !hasPlan ? <div className="image-planning-stage" aria-live="polite">
-      <div className="planning-copy"><span><LoaderCircle className="spin" size={17} /></span><div><b>{isReal ? '正在按宣传主题分组实拍图片' : progress?.label || '正在拆解文案与翻页节奏'}</b><small>{isReal ? '分组完成后会在本地自动裁剪、拼接并绘制艺术字' : '先展开画布，规划完成后会逐张呈现成品'}</small></div></div>
-      <div className="planning-stream"><div><Sparkles size={14} /><span>{isReal ? '实拍分组实时输出' : '套图策划实时输出'}</span><small>{stream.done ? '正在整理结果' : '生成中'}</small></div><pre ref={planningStreamRef}>{planningContent || (isReal ? '正在读取业务原始素材、已确认文案和实拍图片标签…' : '正在读取已确认文案、业务事实与参考图片标签…')}</pre><i aria-hidden="true" /></div>
+      <div className="planning-copy"><span><LoaderCircle className="spin" size={17} /></span><div><b>{isReal ? '正在按当前文案排序实拍图片' : progress?.label || '正在拆解文案与翻页节奏'}</b><small>{isReal ? '优先选择强相关图片，不足时使用最佳可用素材生成可编辑初稿' : '先展开画布，规划完成后会逐张呈现成品'}</small></div></div>
+      <div className="planning-stream"><div><Sparkles size={14} /><span>{isReal ? '实拍排序实时输出' : '套图策划实时输出'}</span><small>{stream.done ? '正在整理结果' : '生成中'}</small></div><pre ref={planningStreamRef}>{planningContent || (isReal ? '正在读取已确认文案和实拍图片客观标签…' : '正在读取已确认文案、业务事实与参考图片标签…')}</pre><i aria-hidden="true" /></div>
     </div> : !hasPlan ? <ActionState
       icon={isReal ? <LayoutTemplate size={27} /> : <ImagePlus size={27} />}
       title={isReal ? `为「${draft.title}」制作实拍宣传图` : `为「${draft.title}」生成整套配图`}
-      description={isReal ? '系统会先按共同宣传主题分组，再从单图、双图、三图和四图模板中选择合适版式，在本地准确绘制中文艺术字。' : '系统会先拆解翻页叙事，并从参考库中为每一页选择最合适的视觉样本。通常生成 4–6 张。'}
+      description={isReal ? '系统会按当前文案逐张排序，贪心选择最相关且互补的实拍图片；相关性较弱时仍会生成可编辑初稿。' : '系统会先拆解翻页叙事，并从参考库中为每一页选择最合适的视觉样本。通常生成 4–6 张。'}
       button={<button className="primary" onClick={() => isReal ? createRealPosterSet(draft.version) : createImageSet(draft.version)} disabled={!!busy || !ready}>{generatingSet ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}{generatingSet ? '正在制作' : isReal ? '用实拍图片制作' : '按参考样本生成整套配图'}</button>}
     /> : <>
       <div className="storyboard-head"><div><span>{isReal ? '实拍分组思路' : '套图思路'}</span><h3>{task!.plan.concept}</h3><p>{task!.plan.visualContinuity}</p></div><div className="storyboard-progress"><b>{readyCount}/{pages.length}</b><span>张已完成</span></div></div>
@@ -943,9 +971,9 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
         const editing = editingPage === page.id
         return <article key={page.id} className={`story-page ${page.role === 'cover' ? 'cover' : ''} ${generating ? 'is-generating' : ''} ${imageUrls[image?.id || ''] ? 'is-revealed' : ''}`}>
           <div className="story-image">{image && imageUrls[image.id] ? <img src={imageUrls[image.id]} alt={`${page.label}：${page.title}`} /> : <div className={`story-image-empty ${generating ? 'generation-canvas' : ''}`}>{generating ? <><div className="canvas-orb" /><i className="canvas-scan" /><LoaderCircle className="spin" size={22} /><b>正在制作{page.label}</b></> : <><ImageIcon size={25} /><span>等待生成</span></>}</div>}<span className="story-index">{String(index + 1).padStart(2, '0')}</span><span className="story-role">{page.label}</span>{regenerating && <div className="story-image-busy"><LoaderCircle className="spin" size={25} /><b>正在更新{page.label}</b></div>}</div>
-          <div className="story-copy"><div><h3>{page.title}</h3><p>{isReal ? page.groupReason || page.purpose : page.purpose}</p></div><span>版本 {Math.max(1, revisions)}</span></div>
-          <div className="story-references"><span>{isReal ? `${references.length} 张实拍` : '本页参考'}</span><div>{references.map((reference) => { const summary = 'originalDescription' in reference.tags ? reference.tags.originalDescription : reference.tags.summary; return <span key={reference.id} title={summary}>{imageUrls[reference.id] ? <img src={imageUrls[reference.id]} alt={summary} /> : <ImageIcon size={14} />}<small>{reference.id}</small></span> })}</div></div>
-          <div className="story-actions"><button className="text-button" onClick={() => image && exportImage(task!.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button>{isReal ? <button className="secondary compact" onClick={() => setPosterEditorPageId(page.id)} disabled={!image || !!busy}><PenLine size={14} />编辑图片</button> : <><button className="secondary compact" onClick={() => regenerateImage(task!.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button><button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button></>}</div>
+          <div className="story-copy"><div><h3>{page.title}</h3><p>{isReal ? page.groupReason || page.purpose : page.purpose}</p></div><span>{isReal && page.needsReview ? '相关性较弱，建议确认' : `版本 ${Math.max(1, revisions)}`}</span></div>
+          {isReal ? <RealPhotoMatchList page={page} references={references as RealPhoto[]} imageUrls={imageUrls} /> : <div className="story-references"><span>本页参考</span><div>{(references as ImageReference[]).map((reference) => { const summary = reference.tags.summary; return <span key={reference.id} title={summary}>{imageUrls[reference.id] ? <img src={imageUrls[reference.id]} alt={summary} /> : <ImageIcon size={14} />}<small>{reference.id}</small></span> })}</div></div>}
+          <div className="story-actions"><button className="text-button" onClick={() => image && exportImage(task!.id, image.id)} disabled={!image || !!busy}><Download size={14} />导出</button>{isReal ? <button className="secondary compact" onClick={() => setPosterEditorPageId(page.id)} disabled={!!busy}><PenLine size={14} />{image ? '编辑图片' : '手动选图'}</button> : <><button className="secondary compact" onClick={() => regenerateImage(task!.id, page.id, '')} disabled={!image || !!busy}><RefreshCw size={14} />换一张</button><button className={`secondary compact ${editing ? 'active' : ''}`} onClick={() => setEditingPage(editing ? '' : page.id)} disabled={!image || !!busy}><PenLine size={14} />提修改</button></>}</div>
           {!isReal && editing && <div className="story-feedback"><label htmlFor={`feedback-${page.id}`}>你希望怎么改？</label><textarea id={`feedback-${page.id}`} rows={3} value={feedbacks[page.id] || ''} onChange={(event) => setFeedbacks({ ...feedbacks, [page.id]: event.target.value })} /><button className="primary compact" onClick={async () => { const ok = await regenerateImage(task!.id, page.id, feedbacks[page.id] || ''); if (ok) setEditingPage('') }} disabled={!feedbacks[page.id]?.trim() || !!busy}><WandSparkles size={14} />按要求重新生成</button></div>}
         </article>
       })}</div>
@@ -995,6 +1023,8 @@ function RealPosterEditor({ task, page, photos, initialSources, busy, close, sav
   const dirty = JSON.stringify(draft) !== initialSnapshot.current
   const complete = Boolean(draft.title?.trim()) && sourceIds.length > 0 && sourceIds.every(Boolean)
   const selectedPhoto = photos.find((photo) => photo.id === sourceIds[selectedSlot])
+  const pageMatches = new Map((page.photoMatches || []).map((item) => [item.photoId, item]))
+  const selectedMatch = selectedPhoto ? pageMatches.get(selectedPhoto.id) : undefined
   const layouts = REAL_POSTER_LAYOUTS.filter((layout) => layout.count === sourceIds.length)
   const rects = realPosterLayoutRects(draft.layoutTemplateId || defaultRealPosterLayout(sourceIds.length), sourceIds.length)
   const filteredPhotos = usablePhotos.filter((photo) => {
@@ -1087,7 +1117,7 @@ function RealPosterEditor({ task, page, photos, initialSources, busy, close, sav
               ><span>{index + 1}</span>{!sourceIds[index] && <b>选择图片</b>}</button>)}
             </div>
           </div>
-          <div className="poster-preview-hint"><span>{selectedSlot + 1}</span><div><b>{selectedPhoto ? selectedPhoto.tags.originalDescription || selectedPhoto.originalName : `图片 ${selectedSlot + 1} 还未选择`}</b><small>{selectedPhoto ? '在右侧素材区选择另一张即可替换' : '从右侧素材区选择一张图片填入这里'}</small></div></div>
+          <div className="poster-preview-hint"><span>{selectedSlot + 1}</span><div><b>{selectedPhoto ? selectedPhoto.tags.originalDescription || selectedPhoto.originalName : `图片 ${selectedSlot + 1} 还未选择`}</b><small>{selectedPhoto ? '在右侧素材区选择另一张即可替换' : '从右侧素材区选择一张图片填入这里'}</small>{selectedPhoto && <RealPhotoMatchBadge match={selectedMatch} />}</div></div>
         </section>
         <aside className="poster-control-pane">
           <section className="poster-control-section">
@@ -1103,7 +1133,8 @@ function RealPosterEditor({ task, page, photos, initialSources, busy, close, sav
             <div className="poster-layout-list">{layouts.map((layout) => <button key={layout.id} className={draft.layoutTemplateId === layout.id ? 'active' : ''} onClick={() => setDraft({ ...draft, layoutTemplateId: layout.id })}><PosterLayoutDiagram id={layout.id} count={layout.count} /><span><b>{layout.name}</b><small>{layout.description}</small></span>{draft.layoutTemplateId === layout.id && <CheckCircle2 size={16} />}</button>)}</div>
             <div className="poster-slot-list">{sourceIds.map((id, index) => {
               const photo = photos.find((item) => item.id === id)
-              return <div key={`${index}-${id}`} className={`poster-slot-row ${selectedSlot === index ? 'active' : ''}`} role="button" tabIndex={0} onClick={() => setSelectedSlot(index)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedSlot(index) } }}><span className="poster-slot-thumb">{id && assetSources[id] ? <img src={assetSources[id]} alt="" /> : <ImageIcon size={17} />}</span><span><b>图片 {index + 1}</b><small>{photo ? photo.tags.originalDescription || photo.originalName : '点击后从下方素材中选择'}</small></span><span className="poster-slot-status">{id ? '替换' : '待选择'}</span><button aria-label={`移除图片 ${index + 1}`} onClick={(event) => { event.stopPropagation(); removeSlot(index) }}><Trash2 size={13} /></button></div>
+              const match = photo ? pageMatches.get(photo.id) : undefined
+              return <div key={`${index}-${id}`} className={`poster-slot-row ${selectedSlot === index ? 'active' : ''}`} role="button" tabIndex={0} onClick={() => setSelectedSlot(index)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedSlot(index) } }}><span className="poster-slot-thumb">{id && assetSources[id] ? <img src={assetSources[id]} alt="" /> : <ImageIcon size={17} />}</span><span><b>图片 {index + 1}</b><small>{photo ? photo.tags.originalDescription || photo.originalName : '点击后从下方素材中选择'}</small></span><span className="poster-slot-status">{id ? <RealPhotoMatchBadge match={match} /> : '待选择'}</span><button aria-label={`移除图片 ${index + 1}`} onClick={(event) => { event.stopPropagation(); removeSlot(index) }}><Trash2 size={13} /></button></div>
             })}</div>
           </section>
 
@@ -1430,7 +1461,7 @@ function RealPhotoLibrary({ items, busy, progress, upload, importPackage, export
     return () => { active = false }
   }, [items])
   const importing = busy === 'upload-real-photos' && progress && progress.phase !== 'done'
-  return <><div className="asset-toolbar real-photo-toolbar"><div><h2>业务实拍图片库</h2><p>系统会结合业务原始素材生成图片描述和分类标签；也可通过素材包迁移原图和完整标签。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={exportPackage} disabled={!!busy || !items.length}>{busy === 'export-real-photo-package' ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出素材包</button><button className="secondary compact" onClick={importPackage} disabled={!!busy}>{busy === 'import-real-photo-package' ? <LoaderCircle className="spin" size={16} /> : <PackageOpen size={16} />}批量导入</button><button className="primary compact" onClick={upload} disabled={!!busy}>{busy === 'upload-real-photos' ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}上传业务实拍</button></div></div>{importing && <div className="reference-import-progress real-photo-import-progress" aria-live="polite"><span className="reference-import-pulse"><Sparkles size={17} /></span><div><b>{progress.label}</b><small>图片已进入实拍库，分析结果会逐张补全</small></div><strong>{progress.current}/{progress.total}</strong><div className="generation-meter"><i style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} /></div></div>}{items.length === 0 ? <div className="image-reference-empty"><div className="reference-empty-frame real"><ImageIcon size={32} /></div><div><h3>把真实现场变成宣传图素材</h3><p>一次可上传多张照片，也可以导入素材包直接复用已完成的图片分析标签。</p></div></div> : <div className="real-photo-grid">{items.map((item) => <article key={item.id} className={`real-photo-card ${item.enabled ? '' : 'disabled'} ${item.taggingStatus}`}><div className="real-photo-preview">{sources[item.id] ? <img src={sources[item.id]} alt={item.tags.originalDescription || item.originalName} /> : <LoaderCircle className="spin" size={20} />}<code>{item.id}</code><span>{item.width} × {item.height}</span></div><div className="real-photo-copy"><div className="reference-card-head"><div><h3>{item.tags.originalDescription || item.originalName}</h3><span>{item.tags.businessRelation || '等待判断与业务素材的关系'}</span></div><label className="switch"><input type="checkbox" checked={item.enabled} onChange={(event) => toggle(item.id, event.target.checked)} disabled={!!busy} /><span /></label></div>{item.taggingStatus === 'ready' ? <><div className="real-tag-row">{[...item.tags.themeTags, ...item.tags.sceneTags].slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}</div><p>{[...item.tags.subjectTags, ...item.tags.actionTags].slice(0, 6).join(' · ')}</p><small>{item.tags.visualTags.shotScale || '未判断景别'} · {item.tags.visualTags.quality === 'high' ? '画质较好' : item.tags.visualTags.quality === 'low' ? '画质偏低' : '画质一般'} · 留字区 {item.tags.visualTags.textSafeArea}</small></> : item.taggingStatus === 'failed' ? <div className="reference-tag-error"><b>图片分析失败</b><span>{item.taggingError}</span></div> : <div className="reference-tagging"><LoaderCircle className="spin" size={15} /><span>正在结合业务素材分析</span></div>}<div className="reference-card-actions"><button className="text-button" onClick={() => retag(item.id)} disabled={!!busy}>{busy === `retag-real-photo-${item.id}` ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}重新分析</button><button className="icon-button danger" onClick={() => remove(item.id)} disabled={!!busy}><Trash2 size={14} /></button></div></div></article>)}</div>}</>
+  return <><div className="asset-toolbar real-photo-toolbar"><div><h2>业务实拍图片库</h2><p>系统只分析画面可见内容，生成宣传图时再按当前文案排序选图；也可通过素材包迁移原图和完整标签。</p></div><div className="asset-toolbar-actions"><button className="secondary compact" onClick={exportPackage} disabled={!!busy || !items.length}>{busy === 'export-real-photo-package' ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}导出素材包</button><button className="secondary compact" onClick={importPackage} disabled={!!busy}>{busy === 'import-real-photo-package' ? <LoaderCircle className="spin" size={16} /> : <PackageOpen size={16} />}批量导入</button><button className="primary compact" onClick={upload} disabled={!!busy}>{busy === 'upload-real-photos' ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}上传业务实拍</button></div></div>{importing && <div className="reference-import-progress real-photo-import-progress" aria-live="polite"><span className="reference-import-pulse"><Sparkles size={17} /></span><div><b>{progress.label}</b><small>图片已进入实拍库，分析结果会逐张补全</small></div><strong>{progress.current}/{progress.total}</strong><div className="generation-meter"><i style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} /></div></div>}{items.length === 0 ? <div className="image-reference-empty"><div className="reference-empty-frame real"><ImageIcon size={32} /></div><div><h3>把真实现场变成宣传图素材</h3><p>一次可上传多张照片，也可以导入素材包直接复用已完成的图片分析标签。</p></div></div> : <div className="real-photo-grid">{items.map((item) => <article key={item.id} className={`real-photo-card ${item.enabled ? '' : 'disabled'} ${item.taggingStatus}`}><div className="real-photo-preview">{sources[item.id] ? <img src={sources[item.id]} alt={item.tags.originalDescription || item.originalName} /> : <LoaderCircle className="spin" size={20} />}<code>{item.id}</code><span>{item.width} × {item.height}</span></div><div className="real-photo-copy"><div className="reference-card-head"><div><h3>{item.tags.originalDescription || item.originalName}</h3><span>{[...item.tags.sceneTags, ...item.tags.subjectTags, ...item.tags.actionTags].slice(0, 4).join(' · ') || '等待客观画面分析'}</span></div><label className="switch"><input type="checkbox" checked={item.enabled} onChange={(event) => toggle(item.id, event.target.checked)} disabled={!!busy} /><span /></label></div>{item.taggingStatus === 'ready' ? <><div className="real-tag-row">{[...item.tags.themeTags, ...item.tags.sceneTags].slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}</div><p>{[...item.tags.subjectTags, ...item.tags.actionTags].slice(0, 6).join(' · ')}</p><small>{item.tags.visualTags.shotScale || '未判断景别'} · {item.tags.visualTags.quality === 'high' ? '画质较好' : item.tags.visualTags.quality === 'low' ? '画质偏低' : '画质一般'} · 留字区 {item.tags.visualTags.textSafeArea}</small></> : item.taggingStatus === 'failed' ? <div className="reference-tag-error"><b>图片分析失败</b><span>{item.taggingError}</span></div> : <div className="reference-tagging"><LoaderCircle className="spin" size={15} /><span>正在客观分析画面内容</span></div>}<div className="reference-card-actions"><button className="text-button" onClick={() => retag(item.id)} disabled={!!busy}>{busy === `retag-real-photo-${item.id}` ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}重新分析</button><button className="icon-button danger" onClick={() => remove(item.id)} disabled={!!busy}><Trash2 size={14} /></button></div></div></article>)}</div>}</>
 }
 
 function ImageReferenceLibrary({ items, busy, progress, upload, importPackage, exportPackage, retag, setRole, toggle, remove }: { items: ImageReference[]; busy: string; progress: ImageReferenceProgressEvent | null; upload: (isCover: boolean) => void; importPackage: () => void; exportPackage: () => void; retag: (id: string) => void; setRole: (id: string, isCover: boolean) => void; toggle: (id: string, enabled: boolean) => void; remove: (id: string) => void }) {

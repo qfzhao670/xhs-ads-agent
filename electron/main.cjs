@@ -388,9 +388,9 @@ async function callRealPhotoTagger(photo, materialText) {
         temperature: 0.15,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: '你是严谨的业务实拍图片分析器。只描述图片真实可见内容，并结合用户提供的业务原始素材判断可能的业务关系。不得把推测写成事实，只输出合法 JSON。' },
+          { role: 'system', content: '你是严谨的实拍图片客观打标器。只描述图片真实可见或可辨认的内容，不判断图片与业务、产品或文案是否相关，不把推测写成事实，只输出合法 JSON。' },
           { role: 'user', content: [
-            { type: 'text', text: `业务原始素材：\n${material || '未提供'}\n\n请分析这张业务实拍图片。originalDescription 只写画面可见事实；businessRelation 只有在原始素材能够支持时才填写。分类标签要短而稳定。visualTags.subjectPosition 使用 left/center/right 与 top/center/bottom 的组合；textSafeArea 只能是 top、bottom、left、right、none。输出：{"originalDescription":"图片原始描述","businessRelation":"与业务素材的关系","themeTags":["主题"],"sceneTags":["场景"],"subjectTags":["主体"],"actionTags":["动作"],"visualTags":{"orientation":"landscape|portrait|square","shotScale":"远景/中景/近景/特写","subjectPosition":"center","dominantColors":["颜色"],"quality":"high|medium|low","textSafeArea":"top|bottom|left|right|none"}}` },
+            { type: 'text', text: `业务原始素材中的用词参考：\n${material || '未提供'}\n\n请只为这张实拍图片生成客观、可复用的视觉标签。上面的业务素材只能用于统一已经能从画面确认的名词，不能据此推断活动名称、产品、地点、人物身份、效果或图片与业务的关系。originalDescription、themeTags、sceneTags、subjectTags、actionTags 都只能来自画面可见内容；看不清的文字不要猜。visualTags.subjectPosition 使用 left/center/right 与 top/center/bottom 的组合；textSafeArea 只能是 top、bottom、left、right、none。输出：{"originalDescription":"图片可见内容描述","visibleText":["画面中可确认的短文字"],"themeTags":["可见主题"],"sceneTags":["场景"],"subjectTags":["主体"],"actionTags":["动作"],"visualTags":{"orientation":"landscape|portrait|square","shotScale":"远景/中景/近景/特写","subjectPosition":"center","dominantColors":["颜色"],"quality":"high|medium|low","textSafeArea":"top|bottom|left|right|none"}}` },
             { type: 'image_url', image_url: { url: source } },
           ] },
         ],
@@ -653,25 +653,39 @@ async function createImagePlan(project, draft, onChunk = () => {}) {
 async function createRealPosterPlan(project, draft, onChunk = () => {}) {
   const photos = project.realPhotos.filter((item) => item.enabled !== false && item.taggingStatus === 'ready')
   if (!photos.length) throw new Error('请先到“素材管理 → 业务实拍”上传图片并等待分析完成')
-  const catalog = photos.map((item) => ({ id: item.id, width: item.width, height: item.height, tags: item.tags }))
-  const prompt = `请只围绕当前已确认的小红书文案，判断业务实拍图片是否适合制作宣传图，并将适合的图片分成若干页面。
+  const catalog = photos.map((item) => ({
+    id: item.id,
+    width: item.width,
+    height: item.height,
+    tags: {
+      originalDescription: item.tags.originalDescription,
+      visibleText: item.tags.visibleText,
+      businessContext: item.tags.businessContext,
+      themeTags: item.tags.themeTags,
+      sceneTags: item.tags.sceneTags,
+      subjectTags: item.tags.subjectTags,
+      actionTags: item.tags.actionTags,
+      visualTags: item.tags.visualTags,
+    },
+  }))
+  const prompt = `请围绕当前已确认的小红书文案，对全部业务实拍图片逐张排序，并用贪心方式组织成若干宣传图页面。目标是尽可能生成可编辑初稿，不因相关性较弱而中断。
 
 核心规则：
-1. 当前已确认文案是判断图片能否使用的唯一内容依据。图片即使与整个项目、业务原始素材或其他选题有关，只要不能支持当前文案，就必须排除。
-2. 先逐张判断相关性：direct=图片可直接呈现文案中的对象、活动、地点、过程或细节；supporting=图片虽非直接复现，但能自然辅助文案中的具体场景或观点；unrelated=只有项目、受众或宽泛场景相同。只允许使用 direct 或 supporting。
-3. 判断可以宽松，但必须存在具体内容联系。仅仅都出现孩子、都在户外、颜色相近、同属研学项目或同一业务，不能算相关。例如文案讨论光伏板与农业，鹤舞、非遗展陈或普通亲子活动照片属于 unrelated，不得使用。
-4. 每页使用 1–4 张图片；不要为了凑数量加入弱相关图片。强主图可单独成页；全景+细节适合 2 张；一主两辅适合 3 张；同级场景集合适合 4 张。
-5. 同一图片不能重复出现在不同页面。每一页内的图片还必须共同支持文案中的同一个具体主题。
-6. 每页必须填写 evidenceQuotes，且每一项都必须是从当前文案标题、正文或话题标签中逐字摘录的连续原句，不能引用业务原始素材，也不能概括或改写。groupReason 和 relevanceReason 要解释图片中可见内容如何支持该原句。
+1. 所有目录图片都是候选。逐张给出匹配等级：direct=直接展示文案对象、活动、过程或细节；supporting=自然辅助具体场景或观点；contextual=适合表达参与者、团队、现场或氛围；fallback=联系较弱但在现有素材中最接近；conflicting=与文案事实明确冲突或存在明显发布风险。
+2. 只有 conflicting 才排除。不得因为图片只展示学生合影、人物、环境或活动氛围就直接淘汰；没有强相关图时也要使用 contextual 或 fallback 生成最佳可用方案。
+3. 采用贪心选择：每页先选最相关且能独立表达主题的图片，再选择能补充全景、人物、动作或细节的图片；避免选择内容和构图高度重复的照片。
+4. 每页使用 1–4 张图片，同一图片不能跨页重复。每张图片必须单独输出 photoMatches，包含自己的等级、文案原句依据和理由，不能让多张图片共用一个相关性结论。
+5. direct 和 supporting 的 evidenceQuotes 必须逐字摘录当前文案中的连续原句。contextual 和 fallback 也应尽量提供依据，但没有合适原句时可以为空，不得编造。
+6. contextual 和 fallback 只能用于参与者、团队、现场氛围或辅助表达，不能用来证明具体产品功能、效果、价格、权益、资质或业务事实；页面需要标记为建议人工确认。
 7. 标题只能来自当前文案，不得添加新的奖项、级别、地点、效果、价格或承诺。主标题 6–16 字，副标题不超过 14 字。
-8. layoutTemplateId 按图片数量选择：1 张=single-full|single-caption；2 张=split-vertical|split-horizontal|hero-two；3 张=hero-three|left-three；4 张=grid-four|hero-four。
+8. layoutTemplateId 按图片数量选择：1 张=single；2 张=split-vertical|split-horizontal|hero-two；3 张=hero-three|left-three；4 张=grid-four|hero-four。
 9. textPosition 只能是 top 或 bottom；优先参考图片的 textSafeArea，避免遮挡主要人物、动作、建筑和道具。
-10. 如果没有任何 direct 或 supporting 图片，必须返回空的 pages 数组。宁可不生成，也不要扩大文案主题或勉强选图。
+10. 只要存在非 conflicting 图片，pages 就不得为空。如果所有图片都是 conflicting，返回一个不含图片的页面，供用户手动选择。
 
 已确认文案：${JSON.stringify(draft)}
 实拍图片目录：${JSON.stringify(catalog)}
 
-只输出 JSON：{"concept":"整套实拍宣传图主题","visualContinuity":"统一排版规则","pages":[{"promotionTheme":"本页共同主题","purpose":"本页作用","title":"主标题","subtitle":"副标题","sourcePhotoIds":["REALIMG-0001"],"relevanceLevel":"direct|supporting|unrelated","relevanceReason":"图片与当前文案的具体联系","groupReason":"为什么这些图片可以放在一起","evidenceQuotes":["当前文案中的逐字原句"],"layoutTemplateId":"single-full","textPosition":"bottom","accentColor":"#ffd43b"}]}`
+只输出 JSON：{"concept":"整套实拍宣传图主题","visualContinuity":"统一排版规则","pages":[{"promotionTheme":"本页共同主题","purpose":"本页作用","title":"主标题","subtitle":"副标题","photoMatches":[{"photoId":"REALIMG-0001","relevanceLevel":"direct|supporting|contextual|fallback|conflicting","evidenceQuotes":["当前文案中的逐字原句"],"reason":"这张图片自己的匹配理由"}],"groupReason":"贪心选择及图片互补理由","layoutTemplateId":"single","textPosition":"bottom","accentColor":"#ffd43b"}]}`
   const result = await callModel(modelSystem, prompt, onChunk, false)
   return sanitizeRealPosterPlan(result, draft, photos)
 }
@@ -2091,8 +2105,8 @@ ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl, 
       const sourcePhotoIds = Array.isArray(pageUpdate.sourcePhotoIds) ? pageUpdate.sourcePhotoIds.map(String).filter(Boolean).slice(0, 4) : []
       if (!sourcePhotoIds.length) throw new Error('宣传图至少需要一张实拍图片')
       if (new Set(sourcePhotoIds).size !== sourcePhotoIds.length) throw new Error('同一张实拍图片不能在一页中重复使用')
-      const validPhotoIds = new Set(project.realPhotos.map((item) => item.id))
-      if (sourcePhotoIds.some((id) => !validPhotoIds.has(id))) throw new Error('宣传图中包含已不存在的实拍图片')
+      const validPhotoIds = new Set(project.realPhotos.filter((item) => item.enabled !== false && item.taggingStatus === 'ready').map((item) => item.id))
+      if (sourcePhotoIds.some((id) => !validPhotoIds.has(id))) throw new Error('宣传图中包含未启用或尚未完成分析的实拍图片')
       const layoutsByCount = {
         1: ['single'],
         2: ['split-vertical', 'split-horizontal', 'hero-two'],
@@ -2106,7 +2120,15 @@ ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl, 
       const subtitle = String(pageUpdate.subtitle || '').trim().slice(0, 60)
       const textPosition = pageUpdate.textPosition === 'top' ? 'top' : 'bottom'
       const accentColor = /^#[0-9a-f]{6}$/i.test(String(pageUpdate.accentColor || '')) ? String(pageUpdate.accentColor) : '#ffd43b'
-      page = { ...page, title, subtitle, sourcePhotoIds, layoutTemplateId, textPosition, accentColor }
+      const previousMatches = new Map((page.photoMatches || []).map((item) => [item.photoId, item]))
+      const photoMatches = sourcePhotoIds.map((photoId) => previousMatches.get(photoId) || {
+        photoId,
+        relevanceLevel: 'contextual',
+        evidenceQuotes: [],
+        reason: '用户手动选择的实拍图片',
+      })
+      const needsReview = photoMatches.some((item) => ['contextual', 'fallback'].includes(item.relevanceLevel))
+      page = { ...page, title, subtitle, sourcePhotoIds, photoMatches, needsReview, layoutTemplateId, textPosition, accentColor }
       task.plan = { ...task.plan, pages: task.plan.pages.map((item, index) => index === pageIndex ? page : item) }
     }
     const match = String(dataUrl || '').match(/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/)

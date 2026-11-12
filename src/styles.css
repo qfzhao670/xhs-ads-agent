@@ -795,6 +795,24 @@ button.generation-history-trigger { padding-inline: 13px 11px; }
 .story-references > div > span { position: relative; width: 34px; height: 42px; overflow: hidden; border: 1px solid var(--gray-200); border-radius: 5px; background: var(--gray-100); }
 .story-references img { width: 100%; height: 100%; object-fit: cover; }
 .story-references small { position: absolute; right: 2px; bottom: 2px; left: 2px; overflow: hidden; padding: 2px; border-radius: 3px; color: white; background: rgba(15, 23, 42, .72); font-size: 6px; text-overflow: ellipsis; white-space: nowrap; }
+.real-match-panel { padding: 10px 12px 12px; border-bottom: 1px solid var(--gray-200); background: #fbfdfc; }
+.real-match-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.real-match-heading span { color: #334155; font-size: 8px; font-weight: 750; }
+.real-match-heading small { color: #839089; font-size: 7px; }
+.real-match-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.real-match-item { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 7px; min-width: 0; padding: 5px; border: 1px solid #dce7e3; border-radius: 7px; background: white; }
+.real-match-thumb { display: grid; width: 34px; height: 42px; place-items: center; overflow: hidden; border-radius: 5px; color: #71867e; background: #e8f0ed; }
+.real-match-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.real-match-info { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; gap: 5px; }
+.real-match-info > small { width: 100%; overflow: hidden; color: #68766f; font-size: 6px; text-overflow: ellipsis; white-space: nowrap; }
+.real-match-grade { display: inline-grid; grid-template-columns: 3px auto auto; align-items: center; gap: 4px; min-height: 20px; padding: 2px 6px 2px 4px; border: 1px solid #d8e0e8; border-radius: 5px; color: #64748b; background: #f1f5f9; font-size: 7px; line-height: 1; white-space: nowrap; }
+.real-match-grade > i { width: 3px; height: 12px; border-radius: 2px; background: currentColor; }
+.real-match-grade > b { font-size: 7px; font-weight: 850; }
+.real-match-grade.match-direct { border-color: #b5ded4; color: #0f766e; background: #e8f7f2; }
+.real-match-grade.match-supporting { border-color: #b9dce2; color: #16697a; background: #e9f5f7; }
+.real-match-grade.match-contextual { border-color: #ead28b; color: #8a6100; background: #fff8df; }
+.real-match-grade.match-fallback { border-color: #efc29f; color: #9a4b13; background: #fff3e8; }
+.real-match-grade.match-conflicting { border-color: #fecaca; color: #b91c1c; background: #fff1f2; }
 .story-page { overflow: hidden; border: 1px solid var(--gray-200); border-radius: 10px; background: white; box-shadow: 0 2px 7px rgba(15,23,42,.06); }
 .story-page.cover { border-top: 3px solid #e11d48; }
 .story-image { position: relative; overflow: hidden; background: #e8edf4; }
@@ -875,6 +893,7 @@ button.generation-history-trigger { padding-inline: 13px 11px; }
 .poster-preview-hint b, .poster-preview-hint small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .poster-preview-hint b { color: #eef6f4; font-size: 9px; }
 .poster-preview-hint small { color: #91a0b5; font-size: 8px; }
+.poster-preview-hint .real-match-grade { align-self: flex-start; margin-top: 2px; }
 
 .poster-control-pane { min-width: 0; min-height: 0; overflow-y: auto; background: #f7f9fb; overscroll-behavior: contain; }
 .poster-control-section { padding: 17px 20px 19px; border-bottom: 1px solid #dfe5ec; background: white; }
@@ -934,7 +953,7 @@ button.generation-history-trigger { padding-inline: 13px 11px; }
 .poster-slot-row > span:nth-child(2) b, .poster-slot-row > span:nth-child(2) small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .poster-slot-row > span:nth-child(2) b { color: #2e3949; font-size: 9px; }
 .poster-slot-row > span:nth-child(2) small { color: #8993a2; font-size: 7px; }
-.poster-slot-status { min-width: 42px; color: #0f766e; font-size: 8px; font-weight: 650; text-align: right; }
+.poster-slot-status { display: flex; min-width: 76px; justify-content: flex-end; color: #0f766e; font-size: 8px; font-weight: 650; text-align: right; }
 .poster-slot-row > button { display: grid; width: 27px; height: 27px; place-items: center; padding: 0; border: 0; border-radius: 6px; color: #9aa3af; background: transparent; cursor: pointer; }
 .poster-slot-row > button:hover { color: #b91c1c; background: #fff1f2; }
 .poster-assets-section { min-height: 280px; }
