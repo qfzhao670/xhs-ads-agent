@@ -100,24 +100,38 @@ test('negative prompt includes defaults and project-specific exclusions', () => 
   assert.match(prompt, /纸张拼贴/)
 })
 
-test('builds an overlay-only real poster decoration prompt with exact copy', () => {
+test('builds a single-collage decoration prompt with exact copy and protected visual centers', () => {
   const prompt = buildRealPosterDecorationPrompt({
     label: '封面',
     title: '周末去看一场鹤舞',
     subtitle: '在真实现场遇见非遗',
     purpose: '突出现场体验',
     accentColor: '#c94135',
-  }, [{ tags: { visualStyle: '现代中文杂志感', textLayout: '左上粗标题', colorPalette: ['米白', '朱红'] } }])
-  assert.match(prompt, /透明 RGBA 图层/)
-  assert.match(prompt, /alpha=0/)
+  })
+  assert.match(prompt, /图1是一张用户已经完成选图、裁切、排序和版式设计的.*实拍拼图底图/)
+  assert.match(prompt, /图1为唯一图片输入/)
+  assert.match(prompt, /不参考任何其他图片/)
+  assert.match(prompt, /不可重绘、不可篡改/)
+  assert.match(prompt, /拼图结构、图片顺序、槽位尺寸、裁切范围、分隔线和全部摄影像素不变/)
+  assert.match(prompt, /至少约 90% 的画布区域应直接呈现图1/)
+  assert.match(prompt, /每个槽位的视觉重心/)
+  assert.match(prompt, /标题与装饰必须优先落在真实留白、画面边缘或拼图分隔线附近/)
+  assert.match(prompt, /不能只放置标题和一块标题底板/)
+  assert.match(prompt, /至少包含以下三层/)
+  assert.match(prompt, /结构层/)
+  assert.match(prompt, /细节层/)
+  assert.match(prompt, /新增装饰合计建议控制在画面约 5%–10%/)
+  assert.match(prompt, /禁止只生成“大标题＋单一色块”的简陋结果/)
   assert.match(prompt, /主标题：“周末去看一场鹤舞”/)
   assert.match(prompt, /副标题：“在真实现场遇见非遗”/)
-  assert.match(prompt, /不得使用白色、黑色、棋盘格/)
-  assert.match(prompt, /现代中文杂志感/)
-  assert.match(prompt, /最终只返回透明 PNG 装饰层/)
+  assert.match(prompt, /最终只返回完成的宣传图 PNG/)
   const negative = buildRealPosterDecorationNegativePrompt()
-  assert.match(negative, /重新绘制照片/)
-  assert.match(negative, /不透明背景/)
+  assert.match(negative, /重绘拼图底图/)
+  assert.match(negative, /重排图片/)
+  assert.match(negative, /拼图缩成卡片/)
+  assert.match(negative, /遮挡视觉重心/)
+  assert.match(negative, /只有标题没有其他装饰/)
+  assert.match(negative, /密集碎元素/)
 })
 
 test('mixed visual mode requires a real-scene base without banning editorial overlays', () => {
@@ -223,11 +237,11 @@ test('limits qwen image 3.0 to three ordered reference images', () => {
   assert.deepEqual(request.body.input.messages[0].content, [{ image: '1' }, { image: '2' }, { image: '3' }, { text: '提示词' }])
 })
 
-test('omits unsupported negative prompts for qwen image 2.1 transparent editing', () => {
+test('omits unsupported negative prompts for qwen image 2.1 single-collage editing', () => {
   const settings = normalizeImageSettings({ enabled: true, model: 'qwen-image-2.1-pro' })
-  const request = buildImageApiRequest(settings, '只生成透明装饰层', '不透明背景', 123, ['base', 'style'])
+  const request = buildImageApiRequest(settings, '在拼图上叠加装饰', '重绘拼图底图', 123, ['collage'])
   assert.equal(request.body.parameters.negative_prompt, undefined)
-  assert.deepEqual(request.body.input.messages[0].content, [{ image: 'base' }, { image: 'style' }, { text: '只生成透明装饰层' }])
+  assert.deepEqual(request.body.input.messages[0].content, [{ image: 'collage' }, { text: '在拼图上叠加装饰' }])
 })
 
 test('parses image URLs from DashScope and OpenAI-compatible responses', () => {

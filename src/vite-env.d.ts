@@ -50,8 +50,8 @@ interface Window {
     createImageSet(version: number): Promise<ApiResult>
     createRealPosterPlan(version: number): Promise<ApiResult>
     saveRealPosterPage(taskId: string, pageId: string, dataUrl: string, pageUpdate?: RealPosterPageUpdate): Promise<ApiResult>
-    generateRealPosterDecoration(taskId: string, pageId: string, baseDataUrl: string, retryReason?: string): Promise<RealPosterDecorationResult>
-    saveRealPosterDecoration(taskId: string, pageId: string, baseImageId: string, dataUrl: string, decoration: RealPosterDecorationMetadata): Promise<ApiResult>
+    generateRealPosterDecoration(taskId: string, pageId: string, baseDataUrl: string): Promise<ApiResult>
+    selectRealPosterVariant(taskId: string, pageId: string, imageId: string): Promise<ApiResult>
     regenerateImagePage(taskId: string, pageId: string, feedback: string): Promise<ApiResult>
     readGeneratedImage(relativePath: string): Promise<ApiResult>
     exportGeneratedImage(taskId: string, imageId: string): Promise<ApiResult>
@@ -66,10 +66,6 @@ interface Window {
 type AssetKind = 'keywords' | 'references' | 'rules'
 type BatchAssetKind = AssetKind
 type ApiResult = { ok: boolean; data?: ProjectData; error?: string; folder?: string; initialized?: boolean; imported?: number; exported?: number; skipped?: number; failed?: number; savedPath?: string; imageUrl?: string; duplicateId?: string; archivedId?: string; taskId?: string; pageId?: string }
-type RealPosterDecorationMetadata = {
-  overlayRelativePath: string; model: string; prompt: string; negativePrompt: string; seed: number; requestId: string; referenceImageIds: string[]
-}
-type RealPosterDecorationResult = ApiResult & Partial<RealPosterDecorationMetadata>
 type MaterialUploadFile = { name: string; path: string; size: number }
 type MaterialFileSelectionResult = { ok: boolean; error?: string; files?: MaterialUploadFile[] }
 type ImageModelSettings = {
@@ -155,7 +151,7 @@ type ImageBrief = {
 type GeneratedImage = {
   id: string; relativePath: string; createdAt: string; model: string; size: string; seed: number;
   requestId: string; prompt: string; negativePrompt: string; pageId: string; revision: number; feedback: string; referenceImageIds: string[];
-  sourcePhotoIds?: string[]; renderType?: 'real_photo_poster' | 'real_photo_ai_decorated'; baseImageId?: string; overlayRelativePath?: string
+  sourcePhotoIds?: string[]; renderType?: 'real_photo_poster' | 'real_photo_ai_decorated'
 }
 type ImagePlanPage = {
   id: string; role: 'cover' | 'content' | 'summary'; label: string; purpose: string; title: string; referenceImageIds: string[]; brief: ImageBrief;
