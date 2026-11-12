@@ -1048,10 +1048,11 @@ async function saveImageReferences(items) {
   await writeJson(dataPath(IMAGE_REFERENCES_FILE), items.map(normalizeImageReference))
 }
 
-async function retagImageReference(items, index) {
+async function retagImageReference(items, index, onUpdate) {
   const reference = normalizeImageReference(items[index])
   items[index] = { ...reference, taggingStatus: 'pending', taggingError: '', updatedAt: now() }
   await saveImageReferences(items)
+  onUpdate?.(items[index], 'tagging')
   try {
     const tags = await callVisionTagger(reference)
     items[index] = { ...items[index], tags, taggingStatus: 'ready', taggingError: '', updatedAt: now() }
@@ -1059,6 +1060,7 @@ async function retagImageReference(items, index) {
     items[index] = { ...items[index], taggingStatus: 'failed', taggingError: error.message, updatedAt: now() }
   }
   await saveImageReferences(items)
+  onUpdate?.(items[index], 'item-done')
   return items[index]
 }
 
@@ -1141,24 +1143,44 @@ ipcMain.handle('image-reference:upload', async (event, isCover) => {
   } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
 })
 
-ipcMain.handle('image-reference:retag', async (_event, id) => {
+ipcMain.handle('image-reference:retag', async (event, id) => {
   try {
     const items = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
     const index = items.findIndex((item) => item.id === String(id))
     if (index < 0) throw new Error('没有找到要重新打标的图片')
-    const tagged = await retagImageReference(items, index)
+    const tagged = await retagImageReference(items, index, (reference, phase) => {
+      event.sender.send('image-reference:progress', {
+        phase, current: 1, total: 1,
+        label: phase === 'tagging' ? '正在重新分析图片' : reference.taggingStatus === 'ready' ? '图片重新打标完成' : '图片重新打标失败',
+        reference,
+      })
+    })
+    event.sender.send('image-reference:progress', {
+      phase: 'done', current: 1, total: 1,
+      label: tagged.taggingStatus === 'ready' ? '图片重新打标完成' : '图片重新打标失败',
+    })
     if (tagged.taggingStatus !== 'ready') throw new Error(tagged.taggingError || '图片打标失败')
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
 })
 
-ipcMain.handle('image-reference:set-role', async (_event, id, isCover) => {
+ipcMain.handle('image-reference:set-role', async (event, id, isCover) => {
   try {
     const items = (await readJson(dataPath(IMAGE_REFERENCES_FILE), [])).map(normalizeImageReference)
     const index = items.findIndex((item) => item.id === String(id))
     if (index < 0) throw new Error('没有找到要修改的图片')
     items[index] = { ...items[index], isCover: Boolean(isCover), updatedAt: now() }
-    const tagged = await retagImageReference(items, index)
+    const tagged = await retagImageReference(items, index, (reference, phase) => {
+      event.sender.send('image-reference:progress', {
+        phase, current: 1, total: 1,
+        label: phase === 'tagging' ? '正在按新类型重新分析图片' : reference.taggingStatus === 'ready' ? '图片类型和标签已更新' : '图片重新打标失败',
+        reference,
+      })
+    })
+    event.sender.send('image-reference:progress', {
+      phase: 'done', current: 1, total: 1,
+      label: tagged.taggingStatus === 'ready' ? '图片类型和标签已更新' : '图片重新打标失败',
+    })
     if (tagged.taggingStatus !== 'ready') throw new Error(tagged.taggingError || '图片重新打标失败')
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
@@ -1414,10 +1436,11 @@ async function saveRealPhotos(items) {
   await writeJson(dataPath(REAL_PHOTOS_FILE), items.map(normalizeRealPhoto))
 }
 
-async function retagRealPhoto(items, index, materialText) {
+async function retagRealPhoto(items, index, materialText, onUpdate) {
   const photo = normalizeRealPhoto(items[index])
   items[index] = { ...photo, taggingStatus: 'pending', taggingError: '', updatedAt: now() }
   await saveRealPhotos(items)
+  onUpdate?.(items[index], 'analyzing')
   try {
     const tags = await callRealPhotoTagger(photo, materialText)
     items[index] = { ...items[index], tags, taggingStatus: 'ready', taggingError: '', updatedAt: now() }
@@ -1425,6 +1448,7 @@ async function retagRealPhoto(items, index, materialText) {
     items[index] = { ...items[index], taggingStatus: 'failed', taggingError: error.message, updatedAt: now() }
   }
   await saveRealPhotos(items)
+  onUpdate?.(items[index], 'item-done')
   return items[index]
 }
 
@@ -1497,14 +1521,24 @@ ipcMain.handle('real-photo:upload', async (event) => {
   } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
 })
 
-ipcMain.handle('real-photo:retag', async (_event, id) => {
+ipcMain.handle('real-photo:retag', async (event, id) => {
   try {
     const items = (await readJson(dataPath(REAL_PHOTOS_FILE), [])).map(normalizeRealPhoto)
     const index = items.findIndex((item) => item.id === String(id))
     if (index < 0) throw new Error('没有找到要重新分析的实拍图片')
     const materialFile = path.join(currentRoot, '业务原始素材.md')
     const materialText = await exists(materialFile) ? await fsp.readFile(materialFile, 'utf8') : ''
-    const tagged = await retagRealPhoto(items, index, materialText)
+    const tagged = await retagRealPhoto(items, index, materialText, (photo, phase) => {
+      event.sender.send('real-photo:progress', {
+        phase, current: 1, total: 1,
+        label: phase === 'analyzing' ? '正在重新分析业务实拍' : photo.taggingStatus === 'ready' ? '业务实拍重新分析完成' : '业务实拍重新分析失败',
+        photo,
+      })
+    })
+    event.sender.send('real-photo:progress', {
+      phase: 'done', current: 1, total: 1,
+      label: tagged.taggingStatus === 'ready' ? '业务实拍重新分析完成' : '业务实拍重新分析失败',
+    })
     if (tagged.taggingStatus !== 'ready') throw new Error(tagged.taggingError || '实拍图片分析失败')
     return { ok: true, data: await loadProject() }
   } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
