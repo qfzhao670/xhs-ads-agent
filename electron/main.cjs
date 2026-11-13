@@ -1964,16 +1964,19 @@ ipcMain.handle('workflow:confirm', async (_event, version) => {
   } catch (error) { return { ok: false, error: error.message } }
 })
 
-ipcMain.handle('workflow:archive-final', async (_event, version, force = false) => {
+ipcMain.handle('workflow:archive-final', async (_event, version, force = false, generationId) => {
   try {
-    const project = await loadProject()
+    const rootProject = await loadProject()
+    const context = findGenerationContext(rootProject, generationId)
+    if (!context) throw new Error('没有找到要入库的生成记录')
+    const project = context.generationProject
     const draft = project?.drafts.find((item) => item.version === Number(version) && item.confirmed)
     if (!draft) throw new Error('请先确认这篇文案，再执行入库')
     const mode = project.generationConfig.mode || project.strategies.find((item) => item.id === draft.strategyId)?.mode
     if (!mode) throw new Error('这篇文案缺少内容模式，请先重新选择模式并生成')
     const active = project.finalContents.filter((item) => item.status === 'archived')
     const existingVersion = active.find((item) => item.generationId === project.currentGeneration.id && item.draftVersion === draft.version)
-    if (existingVersion) return { ok: true, data: project, archivedId: existingVersion.id }
+    if (existingVersion) return { ok: true, data: await loadProject(), archivedId: existingVersion.id }
     const textHash = finalTextHash(draft.title, draft.body, draft.hashtags)
     const duplicate = active.find((item) => item.mode === mode && item.textHash === textHash)
     if (duplicate && !force) return { ok: false, error: `这篇文字与已入库内容 ${duplicate.id} 完全一致`, duplicateId: duplicate.id }
@@ -2022,10 +2025,57 @@ ipcMain.handle('final-content:remove', async (_event, id) => {
   } catch (error) { return { ok: false, error: error.message } }
 })
 
-ipcMain.handle('real-poster:create-plan', async (event, version) => {
+function findGenerationContext(project, generationId) {
+  if (!project) return null
+  const targetId = String(generationId || project.currentGeneration.id)
+  if (targetId === project.currentGeneration.id) {
+    return { generationProject: project, record: null, recordIndex: -1 }
+  }
+  const recordIndex = project.generationHistory.findIndex((item) => item.id === targetId)
+  if (recordIndex < 0) return null
+  const record = project.generationHistory[recordIndex]
+  const selectedStrategyIds = Array.isArray(record.selectedStrategyIds) && record.selectedStrategyIds.length
+    ? record.selectedStrategyIds
+    : record.selectedStrategyId ? [record.selectedStrategyId] : []
+  const drafts = Array.isArray(record.drafts) ? record.drafts : []
+  const generationProject = {
+    ...project,
+    material: record.material || project.material,
+    keywords: record.keywords || project.keywords,
+    references: record.references || project.references,
+    rules: record.rules || project.rules,
+    facts: Object.prototype.hasOwnProperty.call(record, 'facts') ? record.facts : project.facts,
+    generationConfig: record.generationConfig || normalizeGenerationConfig(),
+    strategies: Array.isArray(record.strategies) ? record.strategies : [],
+    selectedStrategyIds,
+    selectedStrategyId: record.selectedStrategyId || selectedStrategyIds[0] || '',
+    strategyAdvice: record.strategyAdvice && typeof record.strategyAdvice === 'object' ? record.strategyAdvice : {},
+    advice: record.advice || '',
+    drafts,
+    currentDraft: drafts.at(-1) || null,
+    imageTasks: Array.isArray(record.imageTasks) ? record.imageTasks.map(normalizeImageTask) : [],
+    currentGeneration: { id: record.id, createdAt: record.createdAt },
+  }
+  return { generationProject, record, recordIndex }
+}
+
+async function saveGenerationImageTasks(project, context, tasks) {
+  if (context.recordIndex < 0) {
+    await saveImageTasks(tasks)
+    return
+  }
+  const history = [...project.generationHistory]
+  history[context.recordIndex] = { ...context.record, imageTasks: tasks }
+  await writeJson(outputPath('生成记录.json'), history)
+}
+
+ipcMain.handle('real-poster:create-plan', async (event, version, generationId) => {
   const operation = `real-poster-plan:${Number(version) || 0}`
   try {
-    const project = await loadProject()
+    const rootProject = await loadProject()
+    const context = findGenerationContext(rootProject, generationId)
+    if (!context) throw new Error('没有找到要制作配图的生成记录')
+    const project = context.generationProject
     const draft = project?.drafts.find((item) => item.version === Number(version) && item.confirmed)
     if (!draft) throw new Error('请先确认这篇文案，再制作实拍宣传图')
     const plan = await createRealPosterPlan(project, draft, modelStream(event, operation))
@@ -2044,7 +2094,7 @@ ipcMain.handle('real-poster:create-plan', async (event, version) => {
     }
     if (index >= 0) tasks[index] = task
     else tasks.push(task)
-    await saveImageTasks(tasks)
+    await saveGenerationImageTasks(rootProject, context, tasks)
     await saveImageTaskArtifacts(task)
     return { ok: true, data: await loadProject(), taskId }
   } catch (error) {
@@ -2053,11 +2103,14 @@ ipcMain.handle('real-poster:create-plan', async (event, version) => {
   }
 })
 
-ipcMain.handle('image:create-set', async (event, version) => {
+ipcMain.handle('image:create-set', async (event, version, generationId) => {
   const planningOperation = `image-plan:${Number(version) || 0}`
   let planningStreamActive = false
   try {
-    const project = await loadProject()
+    const rootProject = await loadProject()
+    const context = findGenerationContext(rootProject, generationId)
+    if (!context) throw new Error('没有找到要制作配图的生成记录')
+    const project = context.generationProject
     const draft = project?.drafts.find((item) => item.version === Number(version) && item.confirmed)
     if (!draft) throw new Error('请先确认这篇文案，再生成整套配图')
     const taskId = `IMG-${project.currentGeneration.id}-${draft.strategyId}-V${draft.version}`
@@ -2095,7 +2148,7 @@ ipcMain.handle('image:create-set', async (event, version) => {
       }
       if (taskIndex >= 0) tasks[taskIndex] = task
       else { tasks.push(task); taskIndex = tasks.length - 1 }
-      await saveImageTasks(tasks)
+      await saveGenerationImageTasks(rootProject, context, tasks)
       await saveImageTaskArtifacts(task)
       event.sender.send('image:progress', {
         version: draft.version, phase: 'planning', current: 0, total: task.plan.pages.length,
@@ -2122,7 +2175,7 @@ ipcMain.handle('image:create-set', async (event, version) => {
       task.negativePrompt = image.negativePrompt
       task.updatedAt = now()
       tasks[taskIndex] = task
-      await saveImageTasks(tasks)
+      await saveGenerationImageTasks(rootProject, context, tasks)
       await saveImageTaskArtifacts(task)
       event.sender.send('image:progress', {
         version: draft.version, pageId: page.id, phase: 'page-done',
@@ -2152,10 +2205,10 @@ function findImageTaskContext(project, taskId) {
 ipcMain.handle('real-poster:generate-decoration', async (_event, taskId, pageId, baseDataUrl) => {
   try {
     const project = await loadProject()
-    const taskIndex = project?.imageTasks.findIndex((item) => item.id === String(taskId)) ?? -1
-    if (taskIndex < 0) throw new Error('没有找到要进行 AI 装饰的实拍宣传图')
-    const tasks = [...project.imageTasks]
-    const task = normalizeImageTask(tasks[taskIndex])
+    const located = findImageTaskContext(project, taskId)
+    if (!located) throw new Error('没有找到要进行 AI 装饰的实拍宣传图')
+    const tasks = located.record ? [...(located.record.imageTasks || [])] : [...project.imageTasks]
+    const task = located.task
     if (!task || task.mode !== 'real_photo_poster') throw new Error('没有找到要进行 AI 装饰的实拍宣传图')
     const page = task.plan.pages.find((item) => item.id === String(pageId))
     if (!page) throw new Error('没有找到要进行 AI 装饰的页面')
@@ -2180,8 +2233,8 @@ ipcMain.handle('real-poster:generate-decoration', async (_event, taskId, pageId,
     task.prompt = image.prompt
     task.negativePrompt = image.negativePrompt
     task.updatedAt = now()
-    tasks[taskIndex] = task
-    await saveImageTasks(tasks)
+    tasks[located.taskIndex] = task
+    await saveGenerationImageTasks(project, located, tasks)
     await saveImageTaskArtifacts(task)
     return { ok: true, data: await loadProject(), pageId: page.id }
   } catch (error) { return { ok: false, error: error.message } }
@@ -2190,10 +2243,10 @@ ipcMain.handle('real-poster:generate-decoration', async (_event, taskId, pageId,
 ipcMain.handle('real-poster:select-variant', async (_event, taskId, pageId, imageId) => {
   try {
     const project = await loadProject()
-    const taskIndex = project.imageTasks.findIndex((item) => item.id === String(taskId))
-    if (taskIndex < 0) throw new Error('没有找到要切换版本的实拍宣传图任务')
-    const tasks = [...project.imageTasks]
-    const task = normalizeImageTask(tasks[taskIndex])
+    const located = findImageTaskContext(project, taskId)
+    if (!located) throw new Error('没有找到要切换版本的实拍宣传图任务')
+    const tasks = located.record ? [...(located.record.imageTasks || [])] : [...project.imageTasks]
+    const task = located.task
     if (task.mode !== 'real_photo_poster') throw new Error('当前任务不是实拍宣传图')
     const page = task.plan.pages.find((item) => item.id === String(pageId))
     if (!page) throw new Error('没有找到要切换版本的页面')
@@ -2201,8 +2254,8 @@ ipcMain.handle('real-poster:select-variant', async (_event, taskId, pageId, imag
     if (!image) throw new Error('没有找到要切换的图片版本')
     task.currentImageIds = { ...task.currentImageIds, [page.id]: image.id }
     task.updatedAt = now()
-    tasks[taskIndex] = task
-    await saveImageTasks(tasks)
+    tasks[located.taskIndex] = task
+    await saveGenerationImageTasks(project, located, tasks)
     await saveImageTaskArtifacts(task)
     return { ok: true, data: await loadProject(), pageId: page.id }
   } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }
@@ -2211,10 +2264,10 @@ ipcMain.handle('real-poster:select-variant', async (_event, taskId, pageId, imag
 ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl, pageUpdate) => {
   try {
     const project = await loadProject()
-    const taskIndex = project.imageTasks.findIndex((item) => item.id === String(taskId))
-    if (taskIndex < 0) throw new Error('没有找到实拍宣传图任务')
-    const tasks = [...project.imageTasks]
-    const task = normalizeImageTask(tasks[taskIndex])
+    const located = findImageTaskContext(project, taskId)
+    if (!located) throw new Error('没有找到实拍宣传图任务')
+    const tasks = located.record ? [...(located.record.imageTasks || [])] : [...project.imageTasks]
+    const task = located.task
     if (task.mode !== 'real_photo_poster') throw new Error('当前任务不是实拍宣传图')
     let pageIndex = task.plan.pages.findIndex((item) => item.id === String(pageId))
     const creatingPage = pageIndex < 0 && pageUpdate?.createNew === true
@@ -2299,8 +2352,8 @@ ipcMain.handle('real-poster:save-page', async (_event, taskId, pageId, dataUrl, 
     task.images = [...task.images, image]
     task.currentImageIds = { ...task.currentImageIds, [page.id]: image.id }
     task.updatedAt = now()
-    tasks[taskIndex] = task
-    await saveImageTasks(tasks)
+    tasks[located.taskIndex] = task
+    await saveGenerationImageTasks(project, located, tasks)
     await saveImageTaskArtifacts(task)
     return { ok: true, data: await loadProject(), pageId: page.id }
   } catch (error) { return { ok: false, error: error.message, data: currentRoot ? await loadProject() : undefined } }

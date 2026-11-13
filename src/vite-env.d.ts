@@ -45,10 +45,10 @@ interface Window {
     reviseDraft(request: string, version: number, thinking: boolean): Promise<ApiResult>
     saveManualDraft(draft: { version: number; title: string; body: string; hashtags: string }): Promise<ApiResult>
     confirmDraft(version: number): Promise<ApiResult>
-    archiveFinal(version: number, force?: boolean): Promise<ApiResult>
+    archiveFinal(version: number, force?: boolean, generationId?: string): Promise<ApiResult>
     removeFinalContent(id: string): Promise<ApiResult>
-    createImageSet(version: number): Promise<ApiResult>
-    createRealPosterPlan(version: number): Promise<ApiResult>
+    createImageSet(version: number, generationId?: string): Promise<ApiResult>
+    createRealPosterPlan(version: number, generationId?: string): Promise<ApiResult>
     saveRealPosterPage(taskId: string, pageId: string, dataUrl: string, pageUpdate?: RealPosterPageUpdate): Promise<ApiResult>
     generateRealPosterDecoration(taskId: string, pageId: string, baseDataUrl: string): Promise<ApiResult>
     selectRealPosterVariant(taskId: string, pageId: string, imageId: string): Promise<ApiResult>

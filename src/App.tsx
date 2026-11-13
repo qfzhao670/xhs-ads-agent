@@ -474,14 +474,14 @@ function App() {
     if (!window.confirm(`确定删除业务实拍 ${id}？原图也会从当前项目中移除。`)) return
     await run(`delete-real-photo-${id}`, () => window.workshop.deleteRealPhoto(id), '业务实拍已删除')
   }
-  async function createRealPosterSet(version: number) {
+  async function createRealPosterSet(version: number, generationId?: string) {
     setBusy('real-poster-set'); setError('')
     try {
-      const planned = await window.workshop.createRealPosterPlan(version)
+      const planned = await window.workshop.createRealPosterPlan(version, generationId)
       if (planned.data) setProject(planned.data)
       if (!planned.ok || !planned.data) { showError(planned.error); return false }
       let current = planned.data
-      const task = current.imageTasks.find((item) => item.id === planned.taskId || (item.mode === 'real_photo_poster' && item.draftVersion === version))
+      const task = generationImageTasks(current, generationId).find((item) => item.id === planned.taskId || (item.mode === 'real_photo_poster' && item.draftVersion === version))
       if (!task) throw new Error('实拍宣传图策划已生成，但没有找到对应任务')
       const photoIds = [...new Set(task.plan.pages.flatMap((page) => page.sourcePhotoIds || []))]
       const entries = await Promise.all(photoIds.map(async (id) => {
@@ -510,7 +510,7 @@ function App() {
     if (!project) return false
     setBusy(`real-poster-edit:${pageUpdate.id}`); setError('')
     try {
-      const task = project.imageTasks.find((item) => item.id === taskId)
+      const task = findProjectImageTask(project, taskId)
       const existingPage = task?.plan.pages.find((item) => item.id === pageUpdate.id)
       const page = existingPage || (pageUpdate.createNew ? ({
         id: pageUpdate.id,
@@ -548,7 +548,7 @@ function App() {
     if (!project) return false
     setBusy(`real-poster-ai:${pageId}`); setError('')
     try {
-      const task = project.imageTasks.find((item) => item.id === taskId)
+      const task = findProjectImageTask(project, taskId)
       const page = task?.plan.pages.find((item) => item.id === pageId)
       if (!task || !page || !(page.sourcePhotoIds || []).length) throw new Error('请先为这一页选择并保存 1–4 张实拍图片')
       const missingPhoto = page.sourcePhotoIds!.find((id) => !sources[id])
@@ -599,14 +599,14 @@ function App() {
       if (project) setFlowStep(suggestedStep(project))
     }
   }
-  async function archiveFinal(version: number, force = false) {
+  async function archiveFinal(version: number, force = false, generationId?: string) {
     if (!force && !window.confirm('入库后，这篇文案的核心选题、目标人群、切入问题和产品承接方式将进入后续避重范围。图片不会参与重复判断。是否确认入库？')) return false
     setBusy('archive-final'); setError('')
     try {
-      const result = await window.workshop.archiveFinal(version, force)
+      const result = await window.workshop.archiveFinal(version, force, generationId)
       if (!result.ok && result.duplicateId && !force) {
         setBusy('')
-        if (window.confirm(`这篇文字与 ${result.duplicateId} 完全一致。只有你明确希望复用历史内容时才应继续，是否仍然入库？`)) return archiveFinal(version, true)
+        if (window.confirm(`这篇文字与 ${result.duplicateId} 完全一致。只有你明确希望复用历史内容时才应继续，是否仍然入库？`)) return archiveFinal(version, true, generationId)
         return false
       }
       if (!result.ok) { showError(result.error); return false }
@@ -679,7 +679,7 @@ function App() {
           revise={async () => { if (!viewVersion) return; const ok = await run('revise', () => window.workshop.reviseDraft(revision, viewVersion, thinkingModes.revise), '修改版本已生成'); if (ok) setRevision('') }}
           saveManual={async (value) => { const ok = await run('manual', () => window.workshop.saveManualDraft(value), '手动修改已保存为新版本'); return ok }}
           confirm={(version) => run('confirm', () => window.workshop.confirmDraft(version), '当前文案已确认')}
-          createImageSet={(version) => run('image-set', () => window.workshop.createImageSet(version), '整套配图已生成并保存到项目')}
+          createImageSet={(version, generationId) => run('image-set', () => window.workshop.createImageSet(version, generationId), '整套配图已生成并保存到项目')}
           createRealPosterSet={createRealPosterSet}
           saveRealPosterEdit={saveRealPosterEdit}
           decorateRealPosterPage={decorateRealPosterPage}
@@ -727,8 +727,8 @@ type GenerationPageProps = {
   revision: string; setRevision: (value: string) => void; revise: () => void;
   saveManual: (draft: { version: number; title: string; body: string; hashtags: string }) => Promise<boolean>;
   confirm: (version: number) => void;
-  createImageSet: (version: number) => Promise<boolean>;
-  createRealPosterSet: (version: number) => Promise<boolean>;
+  createImageSet: (version: number, generationId?: string) => Promise<boolean>;
+  createRealPosterSet: (version: number, generationId?: string) => Promise<boolean>;
   saveRealPosterEdit: (taskId: string, page: RealPosterPageUpdate) => Promise<boolean>;
   decorateRealPosterPage: (taskId: string, pageId: string, sources: Record<string, string>) => Promise<boolean>;
   selectRealPosterVariant: (taskId: string, pageId: string, imageId: string) => Promise<boolean>;
@@ -736,13 +736,45 @@ type GenerationPageProps = {
   exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void;
   goReferenceLibrary: () => void;
   goRealPhotoLibrary: () => void;
-  archiveFinal: (version: number) => Promise<boolean>;
+  archiveFinal: (version: number, force?: boolean, generationId?: string) => Promise<boolean>;
 }
 
 function imageTaskComplete(task?: ImageTask) {
   if (!task) return false
   const pages = task.plan?.pages || []
   return pages.length >= (task.mode === 'real_photo_poster' ? 1 : 4) && pages.every((page) => Boolean(task.currentImageIds?.[page.id]))
+}
+
+function generationImageTasks(project: ProjectData, generationId?: string) {
+  if (!generationId || generationId === project.currentGeneration.id) return project.imageTasks
+  return project.generationHistory.find((record) => record.id === generationId)?.imageTasks || []
+}
+
+function findProjectImageTask(project: ProjectData, taskId: string) {
+  return project.imageTasks.find((task) => task.id === taskId)
+    || project.generationHistory.flatMap((record) => record.imageTasks || []).find((task) => task.id === taskId)
+}
+
+function archivedProjectView(project: ProjectData, record: GenerationRecord): ProjectData {
+  const selectedStrategyIds = record.selectedStrategyIds?.length ? record.selectedStrategyIds : (record.selectedStrategyId ? [record.selectedStrategyId] : [])
+  return {
+    ...project,
+    material: record.material || project.material,
+    keywords: record.keywords || project.keywords,
+    references: record.references || project.references,
+    rules: record.rules || project.rules,
+    facts: record.facts === undefined ? project.facts : record.facts,
+    generationConfig: record.generationConfig || { mode: '', userBriefRaw: '', updatedAt: record.createdAt },
+    strategies: record.strategies,
+    selectedStrategyIds,
+    selectedStrategyId: record.selectedStrategyId || selectedStrategyIds[0] || '',
+    strategyAdvice: record.strategyAdvice || {},
+    advice: record.advice || '',
+    drafts: record.drafts,
+    currentDraft: record.drafts.at(-1) || null,
+    imageTasks: record.imageTasks || [],
+    currentGeneration: { id: record.id, createdAt: record.createdAt },
+  }
 }
 
 const realPhotoMatchMeta: Record<RealPhotoMatchLevel | 'unknown', { grade: string; label: string }> = {
@@ -780,7 +812,7 @@ function blankRealPosterBrief(pageLabel: string): ImageBrief {
 }
 
 function archivedCompleted(record: GenerationRecord) {
-  const selectedIds = record.selectedStrategyIds || (record.selectedStrategyId ? [record.selectedStrategyId] : [])
+  const selectedIds = record.selectedStrategyIds?.length ? record.selectedStrategyIds : (record.selectedStrategyId ? [record.selectedStrategyId] : [])
   const hasDraft = record.drafts.length > 0
   const allConfirmed = selectedIds.length > 0 && selectedIds.every((id) => record.drafts.some((draft) => draft.strategyId === id && draft.confirmed))
   const allIllustrated = selectedIds.length > 0 && selectedIds.every((id) => {
@@ -824,7 +856,14 @@ function GenerationPage(props: GenerationPageProps) {
       </section>
       <div className="generation-main">
         {modelBusy && <GenerationActivity stream={props.stream} busy={busy} project={project} thinkingEnabled={props.thinkingModes[busy as 'facts' | 'strategies' | 'draft' | 'revise']} />}
-        {archived ? <ArchivedGeneration record={archived} step={flowStep} busy={busy} regenerateImage={props.regenerateImage} exportImage={props.exportImage} exportImageSet={props.exportImageSet} /> : <CurrentFlow {...props} />}
+        {archived ? <ArchivedGeneration
+          project={project} record={archived} step={flowStep} busy={busy} stream={props.stream} imageProgress={props.imageProgress}
+          createImageSet={props.createImageSet} createRealPosterSet={props.createRealPosterSet}
+          saveRealPosterEdit={props.saveRealPosterEdit} decorateRealPosterPage={props.decorateRealPosterPage} selectRealPosterVariant={props.selectRealPosterVariant}
+          regenerateImage={props.regenerateImage} exportImage={props.exportImage} exportImageSet={props.exportImageSet}
+          archiveFinal={props.archiveFinal} goReferenceLibrary={props.goReferenceLibrary} goRealPhotoLibrary={props.goRealPhotoLibrary}
+          goArchive={() => setFlowStep(8)} goImages={() => setFlowStep(7)}
+        /> : <CurrentFlow {...props} />}
       </div>
     </>}
   </div>
@@ -937,7 +976,7 @@ function ReviewStep({ project, draft, viewVersion, setViewVersion, revision, set
 
 function ImageStep({ project, busy, stream, imageProgress, createImageSet, createRealPosterSet, saveRealPosterEdit, decorateRealPosterPage, selectRealPosterVariant, regenerateImage, exportImage, exportImageSet, goReferenceLibrary, goRealPhotoLibrary, goArchive }: {
   project: ProjectData; busy: string; stream: { operation: string; content: string; thinking: string; done: boolean }; imageProgress: Record<string, ImageProgressEvent>;
-  createImageSet: (version: number) => Promise<boolean>; createRealPosterSet: (version: number) => Promise<boolean>;
+  createImageSet: (version: number, generationId?: string) => Promise<boolean>; createRealPosterSet: (version: number, generationId?: string) => Promise<boolean>;
   saveRealPosterEdit: (taskId: string, page: RealPosterPageUpdate) => Promise<boolean>;
   decorateRealPosterPage: (taskId: string, pageId: string, sources: Record<string, string>) => Promise<boolean>;
   selectRealPosterVariant: (taskId: string, pageId: string, imageId: string) => Promise<boolean>;
@@ -947,7 +986,10 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
 }) {
   const confirmedDrafts = project.selectedStrategyIds.map((strategyId) => project.drafts.find((item) => item.strategyId === strategyId && item.confirmed)).filter(Boolean) as Draft[]
   const [selectedVersion, setSelectedVersion] = useState(confirmedDrafts[0]?.version || 0)
-  const [imageMode, setImageMode] = useState<'ai_generated' | 'real_photo_poster'>('ai_generated')
+  const [imageMode, setImageMode] = useState<'ai_generated' | 'real_photo_poster'>(() => {
+    const latestTask = [...project.imageTasks].sort((left, right) => String(left.updatedAt).localeCompare(String(right.updatedAt))).at(-1)
+    return latestTask?.mode === 'real_photo_poster' ? 'real_photo_poster' : 'ai_generated'
+  })
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({})
   const [feedbacks, setFeedbacks] = useState<Record<string, string>>({})
   const [editingPage, setEditingPage] = useState('')
@@ -1043,7 +1085,7 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
       icon={isReal ? <LayoutTemplate size={27} /> : <ImagePlus size={27} />}
       title={isReal ? `为「${draft.title}」制作实拍宣传图` : `为「${draft.title}」生成整套配图`}
       description={isReal ? '系统会按当前文案逐张排序，贪心选择最相关且互补的实拍图片；相关性较弱时仍会生成可编辑初稿。' : '系统会先拆解翻页叙事，并从参考库中为每一页选择最合适的视觉样本。通常生成 4–6 张。'}
-      button={<button className="primary" onClick={() => isReal ? createRealPosterSet(draft.version) : createImageSet(draft.version)} disabled={!!busy || !ready}>{generatingSet ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}{generatingSet ? '正在制作' : isReal ? '用实拍图片制作' : '按参考样本生成整套配图'}</button>}
+      button={<button className="primary" onClick={() => isReal ? createRealPosterSet(draft.version, project.currentGeneration.id) : createImageSet(draft.version, project.currentGeneration.id)} disabled={!!busy || !ready}>{generatingSet ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}{generatingSet ? '正在制作' : isReal ? '用实拍图片制作' : '按参考样本生成整套配图'}</button>}
     /> : <>
       <div className="storyboard-head"><div><span>{isReal ? '实拍分组思路' : '套图思路'}</span><h3>{task!.plan.concept}</h3><p>{task!.plan.visualContinuity}</p></div><div className="storyboard-progress"><b>{readyCount}/{pages.length}</b><span>张已完成</span></div></div>
       {generatingSet && <div className="set-generation-progress" aria-live="polite"><LoaderCircle className="spin" size={18} /><span><b>{isReal ? '正在本地拼接并绘制艺术字' : progress?.label || '正在生成整套配图'}</b><small>{`已完成 ${readyCount} 张，共 ${pages.length} 张`}</small></span><div className="generation-meter"><i style={{ width: `${pages.length ? (readyCount / pages.length) * 100 : 0}%` }} /></div></div>}
@@ -1070,8 +1112,8 @@ function ImageStep({ project, busy, stream, imageProgress, createImageSet, creat
           {!isReal && editing && <div className="story-feedback"><label htmlFor={`feedback-${page.id}`}>你希望怎么改？</label><textarea id={`feedback-${page.id}`} rows={3} value={feedbacks[page.id] || ''} onChange={(event) => setFeedbacks({ ...feedbacks, [page.id]: event.target.value })} /><button className="primary compact" onClick={async () => { const ok = await regenerateImage(task!.id, page.id, feedbacks[page.id] || ''); if (ok) setEditingPage('') }} disabled={!feedbacks[page.id]?.trim() || !!busy}><WandSparkles size={14} />按要求重新生成</button></div>}
         </article>
       })}{isReal && <button className="story-create-card" onClick={startManualPosterPage} disabled={!!busy || pages.length >= 12} aria-label="手动新建图片"><span><Plus size={24} /></span><b>{pages.length >= 12 ? '已达到 12 张上限' : '手动新建图片'}</b><small>选择实拍素材并编辑排版</small></button>}</div>
-      {isReal && <div className="resume-image-set real-remix"><div><b>需要换一套分组或版式？</b><span>重新制作会基于当前文案和已启用实拍图片生成新方案。</span></div><button className="secondary" onClick={() => createRealPosterSet(draft.version)} disabled={!!busy}><RefreshCw size={16} />重新分组排版</button></div>}
-      {!isReal && readyCount < pages.length && !generatingSet && <div className="resume-image-set"><div><b>还有 {pages.length - readyCount} 张未完成</b><span>可以从中断位置继续，不会重复生成已完成页面。</span></div><button className="primary" onClick={() => createImageSet(draft.version)} disabled={!!busy}><ImagePlus size={16} />继续生成</button></div>}
+      {isReal && <div className="resume-image-set real-remix"><div><b>需要换一套分组或版式？</b><span>重新制作会基于当前文案和已启用实拍图片生成新方案。</span></div><button className="secondary" onClick={() => createRealPosterSet(draft.version, project.currentGeneration.id)} disabled={!!busy}><RefreshCw size={16} />重新分组排版</button></div>}
+      {!isReal && readyCount < pages.length && !generatingSet && <div className="resume-image-set"><div><b>还有 {pages.length - readyCount} 张未完成</b><span>可以从中断位置继续，不会重复生成已完成页面。</span></div><button className="primary" onClick={() => createImageSet(draft.version, project.currentGeneration.id)} disabled={!!busy}><ImagePlus size={16} />继续生成</button></div>}
     </>}
     {allIllustrated && <div className="image-finish-bar"><div><CheckCircle2 size={21} /><span><b>本轮套图已完成</b><small>每篇文案都已经有可入库的配图。</small></span></div></div>}
     <div className="panel-actions"><span className="skip-note">配图可以稍后补充；终稿避重只分析文字，不分析图片。</span><button className="primary" onClick={goArchive} disabled={!!busy}>继续确认入库<ChevronRight size={17} /></button></div>
@@ -1279,8 +1321,19 @@ function GenerationHistory({ project, selected, onSelect, onDelete, busy }: { pr
   return <div className={`generation-history ${open ? 'open' : ''}`} ref={containerRef}><button className="secondary generation-history-trigger" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-haspopup="menu"><Archive size={16} />生成记录<span>{project.generationHistory.length + 1}</span><ChevronDown size={15} /></button>{open && <div className="generation-history-panel" role="menu"><div className="history-list"><button className={selected === 'current' ? 'active' : ''} onClick={() => selectRecord('current')} role="menuitem"><span className="history-status current" /><span><b>{project.currentDraft?.title || '当前生成'}</b><small>{project.currentGeneration.id} · {currentConfirmed ? '已确认' : '进行中'}</small></span></button>{[...project.generationHistory].reverse().map((item) => { const done = archivedCompleted(item)[4]; const deleting = busy === `delete-generation:${item.id}`; return <div key={item.id} className={`history-record ${selected === item.id ? 'active' : ''}`}><button className="history-record-select" onClick={() => selectRecord(item.id)} role="menuitem"><span className="history-status" /><span><b>{item.drafts.at(-1)?.title || '未完成的生成'}</b><small>{item.id} · {done ? '已确认' : '未完成'}</small></span></button><button className="history-record-delete" onClick={() => onDelete(item.id)} disabled={!!busy} title={`删除 ${item.id}`} aria-label={`删除生成记录 ${item.id}`}>{deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}</button></div> })}</div>{project.generationHistory.length === 0 && <p className="history-empty">完成当前文案后，可以继续创建下一轮。</p>}</div>}</div>
 }
 
-function ArchivedGeneration({ record, step, busy, regenerateImage, exportImage, exportImageSet }: { record: GenerationRecord; step: number; busy: string; regenerateImage: (taskId: string, pageId: string, feedback: string) => Promise<boolean>; exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void }) {
-  const selectedIds = record.selectedStrategyIds || (record.selectedStrategyId ? [record.selectedStrategyId] : [])
+function ArchivedGeneration({ project, record, step, busy, stream, imageProgress, createImageSet, createRealPosterSet, saveRealPosterEdit, decorateRealPosterPage, selectRealPosterVariant, regenerateImage, exportImage, exportImageSet, archiveFinal, goReferenceLibrary, goRealPhotoLibrary, goArchive, goImages }: {
+  project: ProjectData; record: GenerationRecord; step: number; busy: string;
+  stream: { operation: string; content: string; thinking: string; done: boolean }; imageProgress: Record<string, ImageProgressEvent>;
+  createImageSet: (version: number, generationId?: string) => Promise<boolean>; createRealPosterSet: (version: number, generationId?: string) => Promise<boolean>;
+  saveRealPosterEdit: (taskId: string, page: RealPosterPageUpdate) => Promise<boolean>;
+  decorateRealPosterPage: (taskId: string, pageId: string, sources: Record<string, string>) => Promise<boolean>;
+  selectRealPosterVariant: (taskId: string, pageId: string, imageId: string) => Promise<boolean>;
+  regenerateImage: (taskId: string, pageId: string, feedback: string) => Promise<boolean>;
+  exportImage: (taskId: string, imageId: string) => void; exportImageSet: (taskId: string) => void;
+  archiveFinal: (version: number, force?: boolean, generationId?: string) => Promise<boolean>;
+  goReferenceLibrary: () => void; goRealPhotoLibrary: () => void; goArchive: () => void; goImages: () => void;
+}) {
+  const selectedIds = record.selectedStrategyIds?.length ? record.selectedStrategyIds : (record.selectedStrategyId ? [record.selectedStrategyId] : [])
   const selectedStrategies = record.strategies.filter((item) => selectedIds.includes(item.id))
   if (step === 1) return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 1`} title="这轮的生成依据">以下是这轮生成使用的素材。</StepHeader><div className={`source-file ${record.material?.exists ? 'ready' : ''}`}><span className="list-icon"><FileText size={20} /></span><div><b>{record.material?.name || '业务原始素材'}</b><small>{record.material?.content ? `${record.material.content.length.toLocaleString()} 个字符` : '旧版记录未保存原始素材快照'}</small></div></div><div className="asset-summary"><div><span>关键词</span><b>{record.keywords?.length || 0}</b><small>条</small></div><div><span>参考文案</span><b>{record.references?.length || 0}</b><small>篇</small></div><div><span>合规准则</span><b>{record.rules?.length || 0}</b><small>条</small></div></div></section>
   if (step === 2) return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 2`} title="这轮的业务事实">这轮生成使用的事实提取结果。</StepHeader>{record.facts ? <div className="facts-table">{record.facts.confirmedFacts.map((group, index) => <div key={`${group.category}-${index}`}><b>{group.category}</b><ul>{group.items.map((item) => <li key={item}>{item}</li>)}</ul></div>)}</div> : <Gate icon={<Archive size={25} />} message="无事实快照" target="这是升级前创建的历史记录。" />}</section>
@@ -1288,8 +1341,13 @@ function ArchivedGeneration({ record, step, busy, regenerateImage, exportImage, 
   if (step === 4) return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 4`} title="这轮的策略选择">蓝色高亮项是本轮实际选用的策略。</StepHeader><div className="strategy-list">{record.strategies.map((strategy) => <div key={strategy.id}><StrategyCard strategy={strategy} project={{ references: record.references || [] } as ProjectData} selected={selectedIds.includes(strategy.id)} onSelect={() => undefined} />{selectedIds.includes(strategy.id) && (record.strategyAdvice?.[strategy.id] || (record.selectedStrategyId === strategy.id && record.advice)) && <div className="archived-advice"><PenLine size={13} /><span>{record.strategyAdvice?.[strategy.id] || record.advice}</span></div>}</div>)}</div></section>
   if (step === 5) return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 5`} title="这轮的生成任务">本轮按以下 {selectedStrategies.length} 个策略生成文案。</StepHeader><div className="compose-strategy-list">{selectedStrategies.map((strategy, index) => <div className="compose-strategy" key={strategy.id}><span>{documentLabel(index)} · {strategy.id}</span><h3>{strategy.name}</h3><p>{strategy.angle}</p>{(record.strategyAdvice?.[strategy.id] || (record.selectedStrategyId === strategy.id && record.advice)) && <small>{record.strategyAdvice?.[strategy.id] || record.advice}</small>}</div>)}</div></section>
   if (step === 6) return <ArchivedReview record={record} />
-  if (step === 7) return <ArchivedImages record={record} busy={busy} regenerateImage={regenerateImage} exportImage={exportImage} exportImageSet={exportImageSet} />
-  return <section className="flow-panel surface-card"><StepHeader step={`${record.id} · 阶段 8`} title="确认入库">终稿入库情况请在左侧“终稿内容库”查看。</StepHeader><Gate icon={<Archive size={25} />} message="终稿库独立保存" target="历史生成记录只保留当轮过程，终稿内容库负责长期资产与避重。" /></section>
+  if (step === 7) return <ImageStep
+    key={record.id} project={archivedProjectView(project, record)} busy={busy} stream={stream} imageProgress={imageProgress}
+    createImageSet={createImageSet} createRealPosterSet={createRealPosterSet} saveRealPosterEdit={saveRealPosterEdit}
+    decorateRealPosterPage={decorateRealPosterPage} selectRealPosterVariant={selectRealPosterVariant} regenerateImage={regenerateImage}
+    exportImage={exportImage} exportImageSet={exportImageSet} goReferenceLibrary={goReferenceLibrary} goRealPhotoLibrary={goRealPhotoLibrary} goArchive={goArchive}
+  />
+  return <ArchiveStep project={archivedProjectView(project, record)} busy={busy} archiveFinal={(version) => archiveFinal(version, false, record.id)} goImages={goImages} />
 }
 
 function ArchivedReview({ record }: { record: GenerationRecord }) {
